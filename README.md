@@ -29,6 +29,14 @@ cpp_library/
 
 ## ライブラリ一覧
 
+### algebra
+
+代数的構造・数値型ライブラリ。
+
+- [fraction.hpp](src/algebra/fraction.hpp) \
+  有理数（分数）構造体 `frac`。常に既約・分母正の正規形で保持し、四則演算・比較・入出力をサポート。整数との混在演算も可能。 \
+  [document](document/fraction.md)
+
 ### geometry
 
 2次元幾何演算ライブラリ。
