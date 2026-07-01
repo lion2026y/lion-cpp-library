@@ -345,3 +345,66 @@ bool comp_arg<T1>(point const& a, point const& b)
 vector<point<>> ps = {{1,0},{0,1},{-1,0}};
 sort(ps.begin(), ps.end(), [](auto& a, auto& b){ return comp_arg(a, b); });
 ```
+
+## グリッドアクセス
+
+2次元グリッド（`vector<vector<...>>`, `vector<string>`, 生2次元配列など、ランダムアクセス可能な入れ子range）を点で添字アクセスするユーティリティ。座標 `p` は `r[p.x][p.y]` に対応する（`x` が外側=行、`y` が内側=列。`move` の `_dr`/`_dc` 規約と一致）。
+
+### at
+
+```cpp
+decltype(auto) at(R&& r, point p)
+```
+
+グリッド `r` を点 `p` で添字アクセスし、要素への参照を返す。`decltype(auto)` で参照を返すため `at(g, p) = v` のように代入もできる。range concept が保証するランダムアクセスイテレータ経由でアクセスするため、`operator[]` を持たないランダムアクセスrangeにも対応する。
+
+**制約**
+
+- `R` がランダムアクセスrangeで、その要素型もランダムアクセスrange（`ranges::random_access_range`）
+- `T` が整数型（`integral<T>`）
+- `p` はグリッド内の有効な座標であること（**境界チェックなし**。範囲外や負値はUB/RE）
+
+**計算量**
+
+- $O(1)$
+
+**使用例**
+
+```cpp
+vector<vector<int>> g(3, vector<int>(4, 0));
+at(g, point<>(1, 2)) = 7;      // g[1][2] = 7
+int v = at(g, point<>(1, 2));  // 7
+
+vector<string> s = {"abc", "def"};
+char c = at(s, point<>(1, 0)); // 'd'
+```
+
+---
+
+### at_safe
+
+```cpp
+E at_safe(R&& r, point p, E e = E{})
+```
+
+`at` の範囲外セーフ版。座標 `p` がグリッド外（負値・サイズ以上）の場合は既定値 `e` を返す。読み取り専用（参照ではなく**値を返す**ため代入はできない）。`e` のデフォルトは要素型のデフォルト値。
+
+**制約**
+
+- `R` がランダムアクセスrangeで、その要素型もランダムアクセスrange
+- `T` が整数型（`integral<T>`）
+- `E` は要素型（`ranges::range_value_t<ranges::range_value_t<R>>`）。デフォルトで要素型に一致
+
+**計算量**
+
+- $O(1)$
+
+**使用例**
+
+```cpp
+vector<vector<int>> g(3, vector<int>(4, 0));
+g[1][2] = 7;
+int a = at_safe(g, point<>(1, 2));     // 7
+int b = at_safe(g, point<>(-1, 0));    // 0（既定値）
+int c = at_safe(g, point<>(5, 0), -1); // -1（範囲外→指定した既定値）
+```

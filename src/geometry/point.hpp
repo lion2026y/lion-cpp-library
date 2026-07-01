@@ -99,4 +99,18 @@ struct point {
     if(ao != bo) return ao < bo;
     return a.cross_product<T1>(b) > 0;
   }
+
+  // 2次元グリッド r を点 p で添字アクセスする. at(g, p) = ... のように使う.
+  template<ranges::random_access_range R>
+    requires ranges::random_access_range<ranges::range_value_t<R>> && integral<T>
+  friend constexpr decltype(auto) at(R&& r, point const p) { return ranges::begin(ranges::begin(r)[p.x])[p.y]; }
+  // p がグリッド外なら e(既定は値型のデフォルト値) を返す, 範囲外セーフな読み取り用.
+  template<ranges::random_access_range R, class E = ranges::range_value_t<ranges::range_value_t<R>>>
+    requires ranges::random_access_range<ranges::range_value_t<R>> && integral<T>
+  friend constexpr E at_safe(R&& r, point const p, E const& e = E{}) {
+    if(p.x < 0 || p.x >= T(ranges::size(r))) return e;
+    auto&& row = ranges::begin(r)[p.x];
+    if(p.y < 0 || p.y >= T(ranges::size(row))) return e;
+    return ranges::begin(row)[p.y];
+  }
 };
