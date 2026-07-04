@@ -69,6 +69,9 @@ cpp_library/
 
 - [memory_pool.hpp](src/pool/memory_pool.hpp) \
   メモリプール。`malloc` によるチャンク確保とフリーリストを組み合わせ、`alloc`/`free` を均し $O(1)$ で提供する。
+- [static_pool.hpp](src/pool/static_pool.hpp) \
+  静的配列 + intrusive free list による index 版メモリプール。`alloc`/`free` を $O(1)$ で提供し、安定した index/参照を得られる。グローバル/`new` 確保前提。 \
+  [document](document/static_pool.md)
 
 ### others
 
