@@ -50,8 +50,11 @@ cpp_library/
 
 ### grid
 
-2次元グリッド操作ユーティリティ。
+多次元配列・グリッド操作ユーティリティ。
 
+- [cumulative_sum.hpp](src/grid/cumulative_sum.hpp) \
+  任意の $d$ 次元配列の累積和をその場で計算するテンプレート関数。二項演算を差し替え可能（default 加算）で、次元数は自動判定する。 \
+  [document](document/cumulative_sum.md)
 - [grid_transform.hpp](src/grid/grid_transform.hpp) \
   2次元 `random_access_range` の転置・90度回転を行うテンプレート関数。非矩形入力は assert で検出する。 \
   [document](document/grid_transform.md)

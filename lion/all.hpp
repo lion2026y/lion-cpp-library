@@ -1,4 +1,5 @@
 #include "lion/RedBlackTree.hpp"
+#include "lion/cumulative_sum.hpp"
 #include "lion/fraction.hpp"
 #include "lion/grid_transform.hpp"
 #include "lion/hashmap.hpp"
