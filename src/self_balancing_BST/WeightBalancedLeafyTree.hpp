@@ -73,13 +73,23 @@ public:
         [[no_unique_address]] wblt_impl::router<RawKey> r;
       } in;
     };
-    node() {}
+    // union のどのメンバも活性でない状態への代入(=生存期間未開始への書き込み)を避けるため,
+    // 必ず mem-init で片方の variant member を構築する. static_pool::alloc が construct_at で呼ぶ.
+    // 葉として構築. ordered の key は new_leaf_key が構築後に代入(lf は生存開始済みなので合法).
+    explicit constexpr node(Value const& v): val(v), sz(1), lf{} {}
+    // 内部として構築. val/sz/router は直後の update() が埋める.
+    constexpr node(uint32_t lc, uint32_t rc): sz(0), in{{lc, rc}, {}} {}
   };
 
 private:
   static constexpr uint32_t NIL = static_pool<node, N>::NIL;
-  static constexpr int D = 3, G = 2; // 平衡パラメータ (delta, gamma).
-  // DFS スタックの上界. 重み平衡なので高さ <= log_{(D+1)/D}(葉数) <= 約 2.41*log2(N). 余裕を見て確保.
+  // 平衡パラメータ (delta, gamma) = (Dn/Dd, Gn/Gd) = (5/2, 3/2). 有理数なので交差乗算で比較(整数のみ).
+  static constexpr int Dn = 5, Dd = 2, Gn = 3, Gd = 2;
+  // like(x,y): x <= delta*y ⟺ Dd*x <= Dn*y(x が y の delta 倍以下=平衡側). 否定が too_heavy.
+  static constexpr bool like(int x, int y) { return Dd * x <= Dn * y; }
+  // single(x,y): x <= gamma*y ⟺ Gd*x <= Gn*y(single rotation で足りる判定).
+  static constexpr bool single(int x, int y) { return Gd * x <= Gn * y; }
+  // DFS スタックの上界. 重み平衡なので高さ <= log_{(delta+1)/delta}(葉数) <= 約 2.06*log2(N). 余裕を見て確保.
   // 固定長ローカル array で使うので, static を持たず(破棄順問題なし)・ヒープ確保もゼロ.
   static constexpr int STACK_CAP = 3 * bit_width(N) + 4;
   static inline Value const e = Q_e();
@@ -93,17 +103,12 @@ private:
   static constexpr bool eqk(Key const& a, Key const& b) { return !comp(a, b) && !comp(b, a); }
   // 部分木の最小 key(ordered 時のみ).
   static constexpr Key const& lo(uint32_t i) { return is_leaf(i) ? pool[i].lf.key : pool[i].in.r.lo; }
-  static constexpr uint32_t new_leaf(Value const& v) {
-    uint32_t u = pool.alloc();
-    pool[u].sz = 1;
-    pool[u].val = v;
-    return u;
-  }
+  static constexpr uint32_t new_leaf(Value const& v) { return pool.alloc(v); } // node(Value) で葉を構築.
   static constexpr uint32_t new_leaf_key(Key const& k, Value const& v)
     requires(ordered)
   {
-    uint32_t u = new_leaf(v);
-    pool[u].lf.key = k;
+    uint32_t u = pool.alloc(v);
+    pool[u].lf.key = k; // lf は node ctor で生存開始済み.
     return u;
   }
   // 集約を子から引き上げる. u は内部ノード.
@@ -116,9 +121,7 @@ private:
   }
   // l,r を子に持つ内部ノードを新規作成(平衡は呼び出し側が保証).
   static constexpr uint32_t make(uint32_t l, uint32_t r) {
-    uint32_t u = pool.alloc();
-    pool[u].in.ch[0] = l;
-    pool[u].in.ch[1] = r;
+    uint32_t u = pool.alloc(l, r); // node(uint32_t,uint32_t) で内部ノードを構築(in を活性化).
     update(u);
     return u;
   }
@@ -133,13 +136,13 @@ private:
   template<class... Args>
   static constexpr uint32_t merge(uint32_t a, Args... rest) { return merge(a, merge(rest...)); }
   static constexpr uint32_t merge_sub(uint32_t l, uint32_t r) { // l,r ともに非 NIL.
-    if(D * w(r) < w(l)) {                                       // l が重すぎ: l の右 spine を降下.
+    if(!like(w(l), w(r))) {                                     // l が重すぎ(w(l)>delta*w(r)): l の右 spine を降下.
       uint32_t a = child(l, 0), c = merge_sub(child(l, 1), r);
-      if(w(c) <= D * w(a)) {
+      if(like(w(c), w(a))) {
         pool[l].in.ch[1] = c, update(l);
         return l;
       }
-      if(w(child(c, 0)) <= G * w(child(c, 1))) { // single rotation.
+      if(single(w(child(c, 0)), w(child(c, 1)))) { // single rotation.
         pool[l].in.ch[1] = child(c, 0), update(l);
         pool[c].in.ch[0] = l, update(c);
         return c;
@@ -151,13 +154,13 @@ private:
       pool[cl].in.ch[0] = l, pool[cl].in.ch[1] = c, update(cl);
       return cl;
     }
-    if(D * w(l) < w(r)) { // r が重すぎ: 対称.
+    if(!like(w(r), w(l))) { // r が重すぎ: 対称.
       uint32_t b = child(r, 1), c = merge_sub(l, child(r, 0));
-      if(w(c) <= D * w(b)) {
+      if(like(w(c), w(b))) {
         pool[r].in.ch[0] = c, update(r);
         return r;
       }
-      if(w(child(c, 1)) <= G * w(child(c, 0))) { // single rotation.
+      if(single(w(child(c, 1)), w(child(c, 0)))) { // single rotation.
         pool[r].in.ch[0] = child(c, 1), update(r);
         pool[c].in.ch[1] = r, update(c);
         return c;
@@ -209,8 +212,7 @@ private:
   // 部分木を丸ごと複製(deep copy). O(部分木サイズ).
   static constexpr uint32_t clone(uint32_t u) {
     if(u == NIL) return NIL;
-    uint32_t v = pool.alloc();
-    pool[v] = pool[u];
+    uint32_t v = pool.alloc(pool[u]); // node のコピー構築(union も活性メンバごと正しく複製).
     if(!is_leaf(u)) pool[v].in.ch[0] = clone(child(u, 0)), pool[v].in.ch[1] = clone(child(u, 1));
     return v;
   }
@@ -411,6 +413,30 @@ private:
   static constexpr int height_sub(uint32_t u) {
     return is_leaf(u) ? 1 : 1 + max(height_sub(child(u, 0)), height_sub(child(u, 1)));
   }
+  // 部分木の {min_key, max_key}(ordered のみ意味あり)を返しつつ全不変条件を assert.
+  // クラステンプレートのメンバなので validate() から呼ばれない限り実体化されない(未使用でも 0 コスト).
+  static pair<Key, Key> validate_sub(uint32_t u) {
+    if(is_leaf(u)) {
+      assert(w(u) == 1 && "leaf weight must be 1");
+      if constexpr(ordered) return {pool[u].lf.key, pool[u].lf.key};
+      else return {};
+    }
+    uint32_t l = child(u, 0), r = child(u, 1);
+    pair<Key, Key> pl = validate_sub(l), pr = validate_sub(r);
+    assert(w(u) == w(l) + w(r) && "sz != child sz sum");
+    assert(like(w(l), w(r)) && like(w(r), w(l)) && "weight-balance violated");
+    if constexpr(equality_comparable<Value>)
+      assert(pool[u].val == Q(pool[l].val, pool[r].val) && "val != Q(children)");
+    if constexpr(ordered) {
+      assert(comp(pl.second, pr.first) && "keys not strictly increasing (unique map)");
+      assert(eqk(pool[u].in.r.lo, pl.first) && "router lo != subtree min key");
+      assert(eqk(pool[u].in.r.sep, pr.first) && "router sep != right subtree min key");
+      return {pl.first, pr.second};
+    } else {
+      (void)pl, (void)pr;
+      return {};
+    }
+  }
 
 public:
   // static_pool::fast への参照. true で自動破棄を省略(=生存要素の Value dtor を捨てる高速化).
@@ -419,7 +445,7 @@ public:
   constexpr weight_balanced_leafy_tree(): root(NIL) {}
   constexpr weight_balanced_leafy_tree(vector<Value> const& v)
     requires(!ordered)
-      : root(build(v, 0, v.size())) {}
+      : root(build(v, 0, v.size())) { validate(); }
   // sorted でなければ stable_sort. key は一意でなければ assert(map 意味論).
   constexpr weight_balanced_leafy_tree(vector<pair<Key, Value>> v)
     requires(ordered)
@@ -427,13 +453,15 @@ public:
     stable_sort(v.begin(), v.end(), [](auto const& x, auto const& y) { return comp(x.first, y.first); });
     for(size_t i = 1; i < v.size(); ++i) assert(!eqk(v[i - 1].first, v[i].first) && "duplicate keys not allowed");
     root = build_key(v, 0, v.size());
+    validate();
   }
   // copy は deep copy(node を共有しない). O(N).
-  constexpr weight_balanced_leafy_tree(weight_balanced_leafy_tree const& ot): root(clone(ot.root)) {}
+  constexpr weight_balanced_leafy_tree(weight_balanced_leafy_tree const& ot): root(clone(ot.root)) { validate(); }
   constexpr weight_balanced_leafy_tree& operator=(weight_balanced_leafy_tree const& ot) {
     if(this != &ot) {
       if(!fast) clear();
       root = clone(ot.root);
+      validate();
     }
     return *this;
   }
@@ -460,6 +488,13 @@ public:
   }
   // 木の高さ(デバッグ・検証用). O(N).
   constexpr int height() const { return root == NIL ? 0 : height_sub(root); } // デバッグ用. O(N).
+  // __LION_DEBUG 設定時のみ, 現在の木が全不変条件(sz/集約/重み平衡/key 順序/router lo,sep)を
+  // 満たすか検査(assert). 非設定時は no-op. O(N).
+  constexpr void validate() const {
+#ifdef __LION_DEBUG
+    if(root != NIL) validate_sub(root);
+#endif
+  }
 
   // ===== index API(sequence, ordered=false). =====
   // O(logN) index k の値.
@@ -475,6 +510,7 @@ public:
   {
     assert(0 <= k && k < size());
     update_sub(root, k, [&](Value const&) { return v; });
+    validate();
   }
   // O(logN) index k の値を f(値) に置換(名前 apply は遅延の区間作用に予約).
   template<class F>
@@ -482,6 +518,7 @@ public:
   constexpr void modify(int k, F const& f) {
     assert(0 <= k && k < size());
     update_sub(root, k, f);
+    validate();
   }
   // O(logN) index k の手前に v を挿入(挿入後に k 番目).
   constexpr void insert(int k, Value const& v)
@@ -490,6 +527,7 @@ public:
     assert(0 <= k && k <= size());
     auto [l, r] = split(root, k);
     root = merge(l, new_leaf(v), r);
+    validate();
   }
   // O(logN) index k の要素を削除.
   constexpr void erase(int k)
@@ -497,6 +535,7 @@ public:
   {
     assert(0 <= k && k < size());
     root = erase_at(root, k);
+    validate();
   }
   // O(logN) [l,r) の総積.
   constexpr Value prod(int l, int r) const
@@ -573,6 +612,7 @@ public:
     bool ok = root != NIL && update_key(root, k, [&](Value const&) { return v; });
     assert(ok && "set(Key,Value): key not found");
     (void)ok;
+    validate();
   }
   // O(logN) key=k の値を f(値) に置換. 存在しなければ assert 失敗(名前 apply は遅延の区間作用に予約).
   template<class F>
@@ -581,14 +621,17 @@ public:
     bool ok = root != NIL && update_key(root, k, f);
     assert(ok && "modify(Key,f): key not found");
     (void)ok;
+    validate();
   }
   // O(logN) key=k があれば f(値) に置換, 無ければ f(e) を挿入(upsert). 存在時はその場更新で速い.
   template<class F>
     requires(ordered && is_invocable_r_v<Value, F, Value>)
   constexpr void modify_or(Key const& k, F const& f) {
-    if(root != NIL && update_key(root, k, f)) return; // 存在 → その場更新.
-    auto [l, eq, r] = split_key3(root, k);            // 不在 → f(e) を挿入(eq==NIL).
-    root = merge(l, new_leaf_key(k, f(e)), r);
+    if(root == NIL || !update_key(root, k, f)) { // 不在 → key<k | key>k に分けて f(e) を挿入.
+      auto [l, r] = split_key(root, k);
+      root = merge(l, new_leaf_key(k, f(e)), r);
+    }
+    validate();
   }
   // O(logN) key=k を挿入. 既に存在すれば値を v に置換(update-or-insert なので名前は upsert).
   constexpr void upsert(Key const& k, Value const& v)
@@ -597,6 +640,7 @@ public:
     auto [l, eq, r] = split_key3(root, k);
     if(eq != NIL) pool.free(eq);
     root = merge(l, new_leaf_key(k, v), r);
+    validate();
   }
   // O(logN) key=k を削除. 存在したかを返す.
   constexpr bool erase(Key const& k)
@@ -606,6 +650,7 @@ public:
     auto [u, idx] = find_leaf_key(root, k);
     if(!eqk(k, pool[u].lf.key)) return false;
     root = erase_at(root, idx);
+    validate();
     return true;
   }
   // O(logN) key ∈ [kl,kr) の総積(1 降下).
@@ -631,6 +676,7 @@ public:
     if(this == &ot) return;
     root = meld_sub(root, ot.root, f);
     ot.root = NIL;
+    validate();
   }
   // O(N) 中身は pool 内 node への参照(木を変更するまで有効).
   constexpr vector<pair<Key const&, Value const&>> get_vec_pair() const
@@ -663,6 +709,7 @@ public:
   {
     assert(0 <= i.id && i.id < size());
     update_sub(root, i.id, [&](Value const&) { return v; });
+    validate();
   }
   // O(logN) index i の値を f(値) に置換(名前 apply は遅延の区間作用に予約).
   template<class F>
@@ -670,6 +717,7 @@ public:
   constexpr void modify(ID i, F const& f) {
     assert(0 <= i.id && i.id < size());
     update_sub(root, i.id, f);
+    validate();
   }
   // O(logN) index i の要素を削除.
   constexpr void erase(ID i)
@@ -677,6 +725,7 @@ public:
   {
     assert(0 <= i.id && i.id < size());
     root = erase_at(root, i.id);
+    validate();
   }
   // O(logN) index ∈ [l,r) の総積.
   constexpr Value prod(ID l, ID r) const
