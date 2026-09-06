@@ -76,7 +76,9 @@ cpp_library/
 - [memory_pool.hpp](src/pool/memory_pool.hpp) \
   メモリプール。`malloc` によるチャンク確保とフリーリストを組み合わせ、`alloc`/`free` を均し $O(1)$ で提供する。
 - [static_pool.hpp](src/pool/static_pool.hpp) \
-  静的配列 + intrusive free list による index 版メモリプール。`alloc`/`free` を $O(1)$ で提供し、安定した index/参照を得られる。グローバル/`new` 確保前提。 \
+  静的配列による index 版メモリプール。`alloc`/`free` を $O(1)$ で提供し、安定した index/参照を得られる。グローバル/`new` 確保前提。 \
+  通常は [static_pool_fast.hpp](src/pool/static_pool_fast.hpp)（intrusive free list）が使われ、`LION_DEBUG` 定義時のみ [static_pool_checked.hpp](src/pool/static_pool_checked.hpp) に自動で差し替わる。検知版は世代付きハンドルにより、free 後アクセス・二重 free・free したスロットが再確保された後の古いハンドルの使用・解放済み領域への書き込み・容量超過などを `assert` で検出する（速度は不問）。 \
+  ハンドル型は実装で異なる（通常 `uint32_t` / 検知版は構造体）ため、利用側は `static_pool<T,N>::id_type`（または `static_pool_id`）で受けること。 \
   [document](document/static_pool.md)
 
 ### others

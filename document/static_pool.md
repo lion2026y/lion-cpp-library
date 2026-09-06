@@ -10,7 +10,26 @@
 
 - **静的配列**：確保済みのオブジェクトは移動しないため、index / 参照が安定する。
 - **intrusive free list**：`free` したスロットの領域にそのまま次の空き index を書き込むため、`stack` 等の別コンテナを持たず `alloc`/`free` が数命令で完了する。
-- **返り値は `uint32_t`**：ポインタ（8B）より軽く、相互参照が多い構造でキャッシュ効率が良い。無効 index / 空きリスト終端を表す番兵 `NIL`（`= uint32_t(-1)`）を公開している。
+- **返り値は `id_type`**：通常ビルドでは `uint32_t` の別名。ポインタ（8B）より軽く、相互参照が多い構造でキャッシュ効率が良い。無効 index / 空きリスト終端を表す番兵 `NIL` を公開している。
+
+**ビルドによる実装の切り替え**：
+
+`static_pool.hpp` はディスパッチャで、実体は次の 2 つ。API は共通なので、再コンパイルするだけで切り替わる。
+
+| ビルド | 実体 | 内容 |
+|---|---|---|
+| 通常 | [static_pool_fast.hpp](../src/pool/static_pool_fast.hpp) | 本ドキュメントが説明する intrusive free list 実装。 |
+| `LION_DEBUG` 定義時 | [static_pool_checked.hpp](../src/pool/static_pool_checked.hpp) | 誤用検知版。世代付きハンドルにより、free 後アクセス・二重 free・**free したスロットが再確保された後の古いハンドルの使用**・解放済み領域への書き込み・容量超過などを `assert` で検出する（速度は不問）。 |
+
+そのため **ハンドルを `uint32_t` で受けてはいけない**。検知版ではハンドルが `{index, 世代}` の構造体になるため、以下のように `id_type`（または `static_pool_id`）で受けること。
+
+```cpp
+static_pool<T, N> pool;
+using id_type = static_pool<T, N>::id_type; // 通常は uint32_t, LION_DEBUG では構造体.
+id_type i = pool.alloc();                   // auto でも可.
+```
+
+ハンドルは不透明な ID として扱い、`==` 比較 / 代入 / `pool` への添字以外（算術・整数への変換）に使わないこと。
 
 **注意点**：
 
@@ -44,10 +63,13 @@ trivial な破棄子の型では常に破棄処理は行われず、このフラ
 ### NIL
 
 ```cpp
-static constexpr uint32_t static_pool<T, N>::NIL = uint32_t(-1);
+static constexpr id_type static_pool<T, N>::NIL;
 ```
 
-空きリストの終端および無効 index を表す番兵値。`alloc` が返す index と衝突しない。
+空きリストの終端および無効 index を表す番兵値。`alloc` が返すハンドルと衝突しない。
+
+実体はビルドによって異なる（通常ビルドは `uint32_t(-1)`、検知版は `{uint32_t(-1), uint32_t(-1)}`）。
+`id_type` は検知版では構造体で整数からは構築できないため、**番兵は必ず `NIL` で参照すること**。
 
 ## コンストラクタ
 
@@ -73,7 +95,7 @@ static_pool<Node, 300000> tree;     // N を指定
 ### alloc
 
 ```cpp
-uint32_t pool.alloc(Args&&... args)
+id_type pool.alloc(Args&&... args)
 ```
 
 スロットを 1 つ確保し、その領域に `T(args...)` を placement new で構築して index を返す。空きリストに再利用可能なスロットがあれば優先して使い、なければ配列の未使用領域から切り出す。
@@ -90,7 +112,7 @@ uint32_t pool.alloc(Args&&... args)
 
 ```cpp
 static_pool<pair<int,int>> pool;
-uint32_t i = pool.alloc(3, 5);   // pair(3, 5) を構築
+id_type i = pool.alloc(3, 5);   // pair(3, 5) を構築
 ```
 
 ---
@@ -98,7 +120,7 @@ uint32_t i = pool.alloc(3, 5);   // pair(3, 5) を構築
 ### free
 
 ```cpp
-void pool.free(uint32_t i)
+void pool.free(id_type i)
 ```
 
 index `i` のスロットを解放し、空きリストの先頭に戻す。`T` が非 trivial な破棄子を持ち、かつ `fast == false` のときは `T::~T()` を呼ぶ。
@@ -114,7 +136,7 @@ index `i` のスロットを解放し、空きリストの先頭に戻す。`T` 
 **使用例**
 
 ```cpp
-uint32_t i = pool.alloc();
+id_type i = pool.alloc();
 pool.free(i);
 ```
 
@@ -147,8 +169,8 @@ pool.clear();   // 全 index を無効化して初期状態へ
 ### operator[]
 
 ```cpp
-T& pool[](uint32_t i)
-T const& pool[](uint32_t i) const
+T& pool[](id_type i)
+T const& pool[](id_type i) const
 ```
 
 index `i` に対応するオブジェクトへの参照を返す。
@@ -164,7 +186,7 @@ index `i` に対応するオブジェクトへの参照を返す。
 **使用例**
 
 ```cpp
-uint32_t i = pool.alloc(10);
+id_type i = pool.alloc(10);
 pool[i] = 42;
 int x = pool[i];   // 42
 ```
@@ -186,7 +208,7 @@ size_t pool.size() const
 **使用例**
 
 ```cpp
-uint32_t i = pool.alloc();
+id_type i = pool.alloc();
 pool.size();   // 1
 pool.free(i);
 pool.size();   // 0

@@ -1,7 +1,7 @@
 // WeightBalancedLeafyTree ユニットテスト.
 // 非可換モノイド(アフィン合成 x -> a*x+b)で prod の適用順序と全 API を検証する.
-// compile: g++ -std=c++23 -O2 -D__LION_DEBUG -I<repo>/cpp_library unit_test.cpp
-//   __LION_DEBUG を付けると各変更操作の内部で validate() が全不変条件を assert する(1 操作 O(N)).
+// compile: g++ -std=c++23 -O2 -DLION_DEBUG -I<repo>/cpp_library unit_test.cpp
+//   LION_DEBUG を付けると各変更操作の内部で validate() が全不変条件を assert する(1 操作 O(N)).
 // run: ./unit_test [seed]   (seed 省略時は既定値)
 #include "lion/WeightBalancedLeafyTree.hpp"
 #include <bits/stdc++.h>
@@ -30,7 +30,10 @@ using OrdS = weight_balanced_leafy_tree<Mode::plain, int, ll>;
 
 static_assert(!Seq::ordered && Ord::ordered);
 // Key=void なら leafkey/router が [[no_unique_address]] で 0 バイトに畳まれる(union は子 2 本の 8B のみ).
+// LION_DEBUG では pool が検知版に差し替わりハンドル id_type が世代付き 8B になるので, このレイアウト検査は通常ビルド限定.
+#ifndef LION_DEBUG
 static_assert(sizeof(SeqS::node) == 24 && sizeof(OrdS::node) == 32);
+#endif
 static_assert(is_trivially_destructible_v<SeqS::node> && is_trivially_destructible_v<OrdS::node>);
 
 int Fc = 0;
@@ -385,10 +388,10 @@ void meld_test(mt19937& rng) {
 }
 
 // 大きめの木で平衡(高さ)が O(log n) に収まるか.
-// 注意: __LION_DEBUG 時は各 upsert が内部 validate() で O(N) になり全体 O(N^2) になるため n を落とす.
+// 注意: LION_DEBUG 時は各 upsert が内部 validate() で O(N) になり全体 O(N^2) になるため n を落とす.
 //       高さの本検証は release ビルド(内部 validate 無効)で大 n を回す.
 void balance_test() {
-#ifdef __LION_DEBUG
+#ifdef LION_DEBUG
   int n = 3000;
 #else
   int n = 300000;

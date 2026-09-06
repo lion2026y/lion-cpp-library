@@ -6,7 +6,8 @@ using namespace std;
 
 // Weight Balanced Leafy Tree
 // 葉に要素・内部ノードは集約のみを持つ leafy 木を、重み(葉数)で平衡する.
-// メモリは index 版 static_pool(uint32_t ハンドル). 子参照 4B でキャッシュ効率重視.
+// メモリは index 版 static_pool(ハンドル型 id_type). 通常ビルドでは id_type=uint32_t で子参照 4B,
+// キャッシュ効率重視. LION_DEBUG では誤用検知版 pool に差し替わり id_type も世代付きになる.
 // merge,split,meld に注意.
 //
 // 平衡: BB[alpha] 相当. 内部ノード u の子 a,b は w(a)<=D*w(b) && w(b)<=D*w(a) を保つ(D=3).
@@ -63,13 +64,19 @@ struct weight_balanced_leafy_tree {
 
 public:
   using ID = bbst::ID;
+  // node ハンドル(pool の index 相当)= static_pool<node,N>::id_type. 通常ビルドでは uint32_t そのものだが,
+  // LION_DEBUG では誤用検知のため世代付き構造体になる. 不透明な ID として扱い,
+  // == 比較 / 代入 / pool への添字以外(算術・整数変換)には使わないこと.
+  // node の定義より前に必要(node が子ハンドルを持つ)ため, pool<node> を実体化せずに
+  // 参照できる T 非依存の別名 static_pool_id を使う(pool<node> の id_type と同じ型).
+  using id_type = static_pool_id;
   struct node {
     Value val;
     int sz; // 部分木の葉数 = 重み. sz==1 ⟺ 葉.
     union {
       [[no_unique_address]] wblt_impl::leafkey<RawKey> lf;
       struct {
-        uint32_t ch[2];
+        id_type ch[2];
         [[no_unique_address]] wblt_impl::router<RawKey> r;
       } in;
     };
@@ -78,11 +85,11 @@ public:
     // 葉として構築. ordered の key は new_leaf_key が構築後に代入(lf は生存開始済みなので合法).
     explicit constexpr node(Value const& v): val(v), sz(1), lf{} {}
     // 内部として構築. val/sz/router は直後の update() が埋める.
-    constexpr node(uint32_t lc, uint32_t rc): sz(0), in{{lc, rc}, {}} {}
+    constexpr node(id_type lc, id_type rc): sz(0), in{{lc, rc}, {}} {}
   };
 
 private:
-  static constexpr uint32_t NIL = static_pool<node, N>::NIL;
+  static constexpr id_type NIL = static_pool<node, N>::NIL;
   // 平衡パラメータ (delta, gamma) = (Dn/Dd, Gn/Gd) = (5/2, 3/2). 有理数なので交差乗算で比較(整数のみ).
   static constexpr int Dn = 5, Dd = 2, Gn = 3, Gd = 2;
   // like(x,y): x <= delta*y ⟺ Dd*x <= Dn*y(x が y の delta 倍以下=平衡側). 否定が too_heavy.
@@ -94,50 +101,50 @@ private:
   static constexpr int STACK_CAP = 3 * bit_width(N) + 4;
   static inline Value const e = Q_e();
   static inline static_pool<node, N> pool;
-  uint32_t root;
+  id_type root;
 
   // ---- node 基本操作 ----
-  static constexpr bool is_leaf(uint32_t i) { return pool[i].sz == 1; }
-  static constexpr int w(uint32_t i) { return pool[i].sz; }
-  static constexpr uint32_t child(uint32_t u, bool d) { return pool[u].in.ch[d]; }
+  static constexpr bool is_leaf(id_type i) { return pool[i].sz == 1; }
+  static constexpr int w(id_type i) { return pool[i].sz; }
+  static constexpr id_type child(id_type u, bool d) { return pool[u].in.ch[d]; }
   static constexpr bool eqk(Key const& a, Key const& b) { return !comp(a, b) && !comp(b, a); }
   // 部分木の最小 key(ordered 時のみ).
-  static constexpr Key const& lo(uint32_t i) { return is_leaf(i) ? pool[i].lf.key : pool[i].in.r.lo; }
-  static constexpr uint32_t new_leaf(Value const& v) { return pool.alloc(v); } // node(Value) で葉を構築.
-  static constexpr uint32_t new_leaf_key(Key const& k, Value const& v)
+  static constexpr Key const& lo(id_type i) { return is_leaf(i) ? pool[i].lf.key : pool[i].in.r.lo; }
+  static constexpr id_type new_leaf(Value const& v) { return pool.alloc(v); } // node(Value) で葉を構築.
+  static constexpr id_type new_leaf_key(Key const& k, Value const& v)
     requires(ordered)
   {
-    uint32_t u = pool.alloc(v);
+    id_type u = pool.alloc(v);
     pool[u].lf.key = k; // lf は node ctor で生存開始済み.
     return u;
   }
   // 集約を子から引き上げる. u は内部ノード.
-  static constexpr void update(uint32_t u) {
+  static constexpr void update(id_type u) {
     node& n = pool[u];
-    uint32_t l = n.in.ch[0], r = n.in.ch[1];
+    id_type l = n.in.ch[0], r = n.in.ch[1];
     n.sz = pool[l].sz + pool[r].sz;
     n.val = Q(pool[l].val, pool[r].val);
     if constexpr(ordered) n.in.r.lo = lo(l), n.in.r.sep = lo(r);
   }
   // l,r を子に持つ内部ノードを新規作成(平衡は呼び出し側が保証).
-  static constexpr uint32_t make(uint32_t l, uint32_t r) {
-    uint32_t u = pool.alloc(l, r); // node(uint32_t,uint32_t) で内部ノードを構築(in を活性化).
+  static constexpr id_type make(id_type l, id_type r) {
+    id_type u = pool.alloc(l, r); // node(id_type,id_type) で内部ノードを構築(in を活性化).
     update(u);
     return u;
   }
 
   // ---- 木操作コア: merge(join) / split / build / clone ----
   // l,r をこの順に連結(join). 片方が空なら他方. 平衡を保つ根を返す. O(logN).
-  static constexpr uint32_t merge(uint32_t l, uint32_t r) {
+  static constexpr id_type merge(id_type l, id_type r) {
     if(l == NIL) return r;
     if(r == NIL) return l;
     return merge_sub(l, r);
   }
   template<class... Args>
-  static constexpr uint32_t merge(uint32_t a, Args... rest) { return merge(a, merge(rest...)); }
-  static constexpr uint32_t merge_sub(uint32_t l, uint32_t r) { // l,r ともに非 NIL.
+  static constexpr id_type merge(id_type a, Args... rest) { return merge(a, merge(rest...)); }
+  static constexpr id_type merge_sub(id_type l, id_type r) { // l,r ともに非 NIL.
     if(!like(w(l), w(r))) {                                     // l が重すぎ(w(l)>delta*w(r)): l の右 spine を降下.
-      uint32_t a = child(l, 0), c = merge_sub(child(l, 1), r);
+      id_type a = child(l, 0), c = merge_sub(child(l, 1), r);
       if(like(w(c), w(a))) {
         pool[l].in.ch[1] = c, update(l);
         return l;
@@ -147,7 +154,7 @@ private:
         pool[c].in.ch[0] = l, update(c);
         return c;
       }
-      uint32_t cl = child(c, 0); // double rotation.
+      id_type cl = child(c, 0); // double rotation.
       pool[l].in.ch[1] = child(cl, 0);
       pool[c].in.ch[0] = child(cl, 1);
       update(l), update(c);
@@ -155,7 +162,7 @@ private:
       return cl;
     }
     if(!like(w(r), w(l))) { // r が重すぎ: 対称.
-      uint32_t b = child(r, 1), c = merge_sub(l, child(r, 0));
+      id_type b = child(r, 1), c = merge_sub(l, child(r, 0));
       if(like(w(c), w(b))) {
         pool[r].in.ch[0] = c, update(r);
         return r;
@@ -165,7 +172,7 @@ private:
         pool[c].in.ch[1] = r, update(c);
         return c;
       }
-      uint32_t cr = child(c, 1); // double rotation.
+      id_type cr = child(c, 1); // double rotation.
       pool[r].in.ch[0] = child(cr, 1);
       pool[c].in.ch[1] = child(cr, 0);
       update(r), update(c);
@@ -175,14 +182,14 @@ private:
     return make(l, r);
   }
   // u を先頭 k 個 / 残りに分ける(index split). u を消費して 2 根を返す. O(logN).
-  static constexpr pair<uint32_t, uint32_t> split(uint32_t u, int k) {
+  static constexpr pair<id_type, id_type> split(id_type u, int k) {
     if(u == NIL) return {NIL, NIL};
     if(k <= 0) return {NIL, u};
     if(k >= w(u)) return {u, NIL};
     return split_sub(u, k);
   }
-  static constexpr pair<uint32_t, uint32_t> split_sub(uint32_t u, int k) { // 0<k<w(u).
-    uint32_t l = child(u, 0), r = child(u, 1);
+  static constexpr pair<id_type, id_type> split_sub(id_type u, int k) { // 0<k<w(u).
+    id_type l = child(u, 0), r = child(u, 1);
     int wl = w(l);
     pool.free(u);
     if(k < wl) {
@@ -195,13 +202,13 @@ private:
     }
     return {l, r};
   }
-  static constexpr uint32_t build(vector<Value> const& v, int l, int r) { // vector から平衡木を構築. O(N).
+  static constexpr id_type build(vector<Value> const& v, int l, int r) { // vector から平衡木を構築. O(N).
     if(l >= r) return NIL;
     if(l + 1 == r) return new_leaf(v[l]);
     int m = (l + r) / 2;
     return make(build(v, l, m), build(v, m, r));
   }
-  static constexpr uint32_t build_key(vector<pair<Key, Value>> const& v, int l, int r)
+  static constexpr id_type build_key(vector<pair<Key, Value>> const& v, int l, int r)
     requires(ordered)
   {
     if(l >= r) return NIL;
@@ -210,36 +217,36 @@ private:
     return make(build_key(v, l, m), build_key(v, m, r));
   }
   // 部分木を丸ごと複製(deep copy). O(部分木サイズ).
-  static constexpr uint32_t clone(uint32_t u) {
+  static constexpr id_type clone(id_type u) {
     if(u == NIL) return NIL;
-    uint32_t v = pool.alloc(pool[u]); // node のコピー構築(union も活性メンバごと正しく複製).
+    id_type v = pool.alloc(pool[u]); // node のコピー構築(union も活性メンバごと正しく複製).
     if(!is_leaf(u)) pool[v].in.ch[0] = clone(child(u, 0)), pool[v].in.ch[1] = clone(child(u, 1));
     return v;
   }
-  static constexpr void free_all(uint32_t u) { // 部分木の全 node を free(固定長ローカル array で DFS).
-    array<uint32_t, STACK_CAP> st;
+  static constexpr void free_all(id_type u) { // 部分木の全 node を free(固定長ローカル array で DFS).
+    array<id_type, STACK_CAP> st;
     int top = 0;
     st[top++] = u;
     while(top) {
-      uint32_t x = st[--top];
+      id_type x = st[--top];
       if(!is_leaf(x)) assert(top + 2 <= STACK_CAP), st[top++] = child(x, 0), st[top++] = child(x, 1);
       pool.free(x);
     }
   }
   // 葉から順に f(葉ハンドル) を呼ぶ左→右 DFS(get_vec 系の共有).
-  static constexpr void each_leaf(uint32_t u, auto const& f) {
-    array<uint32_t, STACK_CAP> st;
+  static constexpr void each_leaf(id_type u, auto const& f) {
+    array<id_type, STACK_CAP> st;
     int top = 0;
     st[top++] = u;
     while(top) {
-      uint32_t x = st[--top];
+      id_type x = st[--top];
       if(is_leaf(x)) f(x);
       else assert(top + 2 <= STACK_CAP), st[top++] = child(x, 1), st[top++] = child(x, 0);
     }
   }
 
   // ---- モード横断の下請け(index を扱うコア) ----
-  static constexpr uint32_t leaf_at(uint32_t u, int k) { // index k の葉ハンドル.
+  static constexpr id_type leaf_at(id_type u, int k) { // index k の葉ハンドル.
     while(!is_leaf(u)) {
       int wl = w(child(u, 0));
       if(k < wl) u = child(u, 0);
@@ -248,7 +255,7 @@ private:
     return u;
   }
   // index k の値を g(値) に変更し祖先を pull-up(set は定数 g, modify は f). key 側 update_key と対.
-  static constexpr void update_sub(uint32_t u, int k, auto const& g) {
+  static constexpr void update_sub(id_type u, int k, auto const& g) {
     if(is_leaf(u)) {
       pool[u].val = g(pool[u].val);
       return;
@@ -258,27 +265,27 @@ private:
     else update_sub(child(u, 1), k - wl, g);
     update(u);
   }
-  static constexpr uint32_t erase_at(uint32_t u, int k) { // index k の葉を削除. 1 パス. O(logN).
+  static constexpr id_type erase_at(id_type u, int k) { // index k の葉を削除. 1 パス. O(logN).
     if(is_leaf(u)) {
       pool.free(u);
       return NIL;
     }
-    uint32_t l = child(u, 0), r = child(u, 1);
+    id_type l = child(u, 0), r = child(u, 1);
     int wl = w(l);
     pool.free(u);
     if(k < wl) return merge(erase_at(l, k), r);
     return merge(l, erase_at(r, k - wl));
   }
-  static constexpr Value prod_sub(uint32_t u, int l, int r) { // [l,r)∩[0,w(u)) の総積(非空前提).
+  static constexpr Value prod_sub(id_type u, int l, int r) { // [l,r)∩[0,w(u)) の総積(非空前提).
     if(l <= 0 && r >= w(u)) return pool[u].val;
-    uint32_t a = child(u, 0), b = child(u, 1);
+    id_type a = child(u, 0), b = child(u, 1);
     int wl = w(a);
     if(r <= wl) return prod_sub(a, l, r);
     if(l >= wl) return prod_sub(b, l - wl, r - wl);
     return Q(prod_sub(a, l, wl), prod_sub(b, 0, r - wl));
   }
   // u の先頭から f を保つ最大の右端 r を返す(木上二分探索, 確保なしの top-down). acc は流入積.
-  static constexpr int mr(uint32_t u, int l, Value& acc, auto const& f) {
+  static constexpr int mr(id_type u, int l, Value& acc, auto const& f) {
     if(l <= 0) {
       Value na = Q(acc, pool[u].val);
       if(f(na)) {
@@ -294,7 +301,7 @@ private:
     return wl + mr(child(u, 1), 0, acc, f);
   }
   // u の [0,r) 内で f を保つ最小の左端 l を返す. acc は流入積.
-  static constexpr int ml(uint32_t u, int r, Value& acc, auto const& f) {
+  static constexpr int ml(id_type u, int r, Value& acc, auto const& f) {
     if(r >= w(u)) {
       Value na = Q(pool[u].val, acc);
       if(f(na)) {
@@ -328,7 +335,7 @@ private:
   // le=false: count key<k(lower_bound) / le=true: count key<=k(upper_bound).
   constexpr int bound(Key const& k, bool le) const {
     if(root == NIL) return 0;
-    uint32_t u = root;
+    id_type u = root;
     int idx = 0;
     while(!is_leaf(u)) {
       Key const& sp = pool[u].in.r.sep;
@@ -341,7 +348,7 @@ private:
     return idx;
   }
   // key=k が入るべき葉と, その葉の index を 1 降下で返す(exact search). key 一意なので唯一.
-  static constexpr pair<uint32_t, int> find_leaf_key(uint32_t u, Key const& k) {
+  static constexpr pair<id_type, int> find_leaf_key(id_type u, Key const& k) {
     int idx = 0;
     while(!is_leaf(u)) {
       if(comp(k, pool[u].in.r.sep)) u = child(u, 0);
@@ -350,7 +357,7 @@ private:
     return {u, idx};
   }
   // key=k の葉の val を g(val) に変更(1 降下で祖先 pull-up). 見つかったか返す(set/modify 共有).
-  static constexpr bool update_key(uint32_t u, Key const& k, auto const& g) {
+  static constexpr bool update_key(id_type u, Key const& k, auto const& g) {
     if(is_leaf(u)) {
       if(!eqk(k, pool[u].lf.key)) return false;
       pool[u].val = g(pool[u].val);
@@ -361,7 +368,7 @@ private:
     return ok;
   }
   // key ∈ [kl,kr) の総積(1 降下). khi=u の keys の strict upper(nullptr=+inf, key 一意前提).
-  static constexpr Value prod_key(uint32_t u, Key const& kl, Key const& kr, Key const* khi) {
+  static constexpr Value prod_key(id_type u, Key const& kl, Key const& kr, Key const* khi) {
     Key const& klo = lo(u);
     if(!comp(klo, kr)) return e;                                     // klo>=kr: 全て範囲外(上).
     if(khi && !comp(kl, *khi)) return e;                             // *khi<=kl: 全て範囲外(下).
@@ -370,7 +377,7 @@ private:
     return Q(prod_key(child(u, 0), kl, kr, &pool[u].in.r.sep), prod_key(child(u, 1), kl, kr, khi));
   }
   // key<s | key==s(単一 or NIL) | key>s に分ける.
-  static constexpr tuple<uint32_t, uint32_t, uint32_t> split_key3(uint32_t u, Key const& s) {
+  static constexpr tuple<id_type, id_type, id_type> split_key3(id_type u, Key const& s) {
     auto [l, ge] = split_key(u, s);
     if(ge != NIL && eqk(lo(ge), s)) {
       auto [eq, gt] = split(ge, 1);
@@ -378,10 +385,10 @@ private:
     }
     return {l, NIL, ge};
   }
-  static constexpr pair<uint32_t, uint32_t> split_key(uint32_t u, Key const& s) { // key<s | key>=s.
+  static constexpr pair<id_type, id_type> split_key(id_type u, Key const& s) { // key<s | key>=s.
     if(u == NIL) return {NIL, NIL};
-    if(is_leaf(u)) return comp(pool[u].lf.key, s) ? pair<uint32_t, uint32_t>{u, NIL} : pair<uint32_t, uint32_t>{NIL, u};
-    uint32_t l = child(u, 0), r = child(u, 1);
+    if(is_leaf(u)) return comp(pool[u].lf.key, s) ? pair<id_type, id_type>{u, NIL} : pair<id_type, id_type>{NIL, u};
+    id_type l = child(u, 0), r = child(u, 1);
     Key sp = pool[u].in.r.sep; // free 後に使うのでコピー必須.
     pool.free(u);
     if(!comp(sp, s)) { // sp>=s: 境界は左.
@@ -392,36 +399,36 @@ private:
     return {merge(l, a), b};
   }
   // 葉 lf(単一要素)を map t に統合挿入. key 衝突時 lf.val = f(lf.val, 既存.val). O(log|t|).
-  static constexpr uint32_t insert_leaf(uint32_t t, uint32_t lf, auto const& f) {
+  static constexpr id_type insert_leaf(id_type t, id_type lf, auto const& f) {
     auto [l, m, r] = split_key3(t, pool[lf].lf.key);
     if(m != NIL) pool[lf].val = f(pool[lf].val, pool[m].val), pool.free(m);
     return merge(l, lf, r);
   }
   // key 一意の map として union. どちらかが葉ならそれを他方へ挿入(高速化). 両内部なら大きい方で split.
-  static constexpr uint32_t meld_sub(uint32_t a, uint32_t b, auto const& f) {
+  static constexpr id_type meld_sub(id_type a, id_type b, auto const& f) {
     if(a == NIL) return b;
     if(b == NIL) return a;
     if(is_leaf(a)) return insert_leaf(b, a, f);
     if(is_leaf(b)) return insert_leaf(a, b, f);
     if(w(a) < w(b)) swap(a, b); // 大きい方 a を分割軸に(小さい方 b を回す).
     Key s = pool[a].in.r.sep;
-    uint32_t al = child(a, 0), ar = child(a, 1);
+    id_type al = child(a, 0), ar = child(a, 1);
     pool.free(a);
     auto [bl, br] = split_key(b, s);
     return merge(meld_sub(al, bl, f), meld_sub(ar, br, f));
   }
-  static constexpr int height_sub(uint32_t u) {
+  static constexpr int height_sub(id_type u) {
     return is_leaf(u) ? 1 : 1 + max(height_sub(child(u, 0)), height_sub(child(u, 1)));
   }
   // 部分木の {min_key, max_key}(ordered のみ意味あり)を返しつつ全不変条件を assert.
   // クラステンプレートのメンバなので validate() から呼ばれない限り実体化されない(未使用でも 0 コスト).
-  static pair<Key, Key> validate_sub(uint32_t u) {
+  static pair<Key, Key> validate_sub(id_type u) {
     if(is_leaf(u)) {
       assert(w(u) == 1 && "leaf weight must be 1");
       if constexpr(ordered) return {pool[u].lf.key, pool[u].lf.key};
       else return {};
     }
-    uint32_t l = child(u, 0), r = child(u, 1);
+    id_type l = child(u, 0), r = child(u, 1);
     pair<Key, Key> pl = validate_sub(l), pr = validate_sub(r);
     assert(w(u) == w(l) + w(r) && "sz != child sz sum");
     assert(like(w(l), w(r)) && like(w(r), w(l)) && "weight-balance violated");
@@ -488,10 +495,10 @@ public:
   }
   // 木の高さ(デバッグ・検証用). O(N).
   constexpr int height() const { return root == NIL ? 0 : height_sub(root); } // デバッグ用. O(N).
-  // __LION_DEBUG 設定時のみ, 現在の木が全不変条件(sz/集約/重み平衡/key 順序/router lo,sep)を
+  // LION_DEBUG 設定時のみ, 現在の木が全不変条件(sz/集約/重み平衡/key 順序/router lo,sep)を
   // 満たすか検査(assert). 非設定時は no-op. O(N).
   constexpr void validate() const {
-#ifdef __LION_DEBUG
+#ifdef LION_DEBUG
     if(root != NIL) validate_sub(root);
 #endif
   }
@@ -563,7 +570,7 @@ public:
   constexpr vector<Value> get_vec() const {
     vector<Value> ret;
     ret.reserve(size());
-    if(root != NIL) each_leaf(root, [&](uint32_t u) { ret.push_back(pool[u].val); });
+    if(root != NIL) each_leaf(root, [&](id_type u) { ret.push_back(pool[u].val); });
     return ret;
   }
 
@@ -684,7 +691,7 @@ public:
   {
     vector<pair<Key const&, Value const&>> ret;
     ret.reserve(size());
-    if(root != NIL) each_leaf(root, [&](uint32_t u) { ret.emplace_back(pool[u].lf.key, pool[u].val); });
+    if(root != NIL) each_leaf(root, [&](id_type u) { ret.emplace_back(pool[u].lf.key, pool[u].val); });
     return ret;
   }
 
