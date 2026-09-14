@@ -31,11 +31,14 @@ cpp_library/
 
 ### algebra
 
-代数的構造・数値型ライブラリ。
+代数的構造・数値型・整数論ライブラリ。
 
 - [fraction.hpp](src/algebra/fraction.hpp) \
   有理数（分数）構造体 `frac`。常に既約・分母正の正規形で保持し、四則演算・比較・入出力をサポート。整数との混在演算も可能。 \
   [document](document/fraction.md)
+- [sieve.hpp](src/algebra/sieve.hpp) \
+  エラトステネスの篩による最小素因数テーブルと素数リスト。素数判定・素因数分解・約数列挙を提供し、テーブルサイズ $n$ に対し $n^2$ 未満の値まで扱える。 \
+  [document](document/sieve.md)
 
 ### geometry
 

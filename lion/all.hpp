@@ -7,5 +7,6 @@
 #include "lion/line_segment.hpp"
 #include "lion/memory_pool.hpp"
 #include "lion/point.hpp"
+#include "lion/sieve.hpp"
 #include "lion/static_pool.hpp"
 #include "lion/timer.hpp"
