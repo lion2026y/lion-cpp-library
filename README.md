@@ -81,8 +81,11 @@ cpp_library/
 
 ### others
 
-その他のユーティリティ。
+その他のデータ構造・ユーティリティ。
 
+- [divset.hpp](src/others/divset.hpp) \
+  多重集合を比較関数の意味で大きいもの $k$ 個とそれ以外に分けて保持する構造体。要素の出入り時のコールバック `add`/`del` で上位 $k$ 個の和などを差分管理でき、追加・削除・$k$ の増減を $O(\log n)$ でサポート。`noop` に依存する。 \
+  [document](document/divset.md)
 - [timer.hpp](src/others/timer.hpp) \
   経過時間をミリ秒単位で計測するタイマー。`steady_clock` ベースで単調増加保証。グローバルインスタンス `cl` が定義済み。 \
   [document](document/timer.md)
@@ -96,3 +99,11 @@ cpp_library/
 - [RedBlackTree.hpp](src/self_balancing_BST/RedBlackTree.hpp) \
   キーと値のペアを管理する平衡二分探索木（赤黒木）。挿入・削除・検索・区間積クエリ・二分探索・木の分割合併を $O(\log N)$ でサポート。 \
   [document](document/RedBlackTree.md)
+
+### utils
+
+他のライブラリから共通で使う小さな部品。
+
+- [noop.hpp](src/utils/noop.hpp) \
+  任意の引数を受け取って何もしない関数オブジェクト `noop`。コールバックを受け取るライブラリのデフォルト引数（NTTP）として使う。 \
+  [document](document/noop.md)
