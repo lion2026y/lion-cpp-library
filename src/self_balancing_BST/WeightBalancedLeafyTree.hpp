@@ -10,8 +10,11 @@ using namespace std;
 // キャッシュ効率重視. LION_DEBUG では誤用検知版 pool に差し替わり id_type も世代付きになる.
 // merge,split,meld に注意.
 //
-// 平衡: BB[alpha] 相当. 内部ノード u の子 a,b は w(a)<=D*w(b) && w(b)<=D*w(a) を保つ(D=3).
-//       join 中に崩れたら single/double 回転(grandchild の重みを G=2 で比較して選択).
+// 平衡: BB[alpha] 相当. 内部ノード u の子 a,b は w(a)<=delta*w(b) && w(b)<=delta*w(a) を保つ(delta=5/2).
+//       join 中に崩れたら single/double 回転(grandchild の重みを gamma=3/2 で比較して選択).
+//       (delta,gamma)=(5/2,3/2) が回転で平衡を回復することは test/.../verify_delta_gamma.py が z3 で検証済み.
+//       ただし検証済みなのは merge_sub の文脈(回転相手が join 結果)だけなので, 単発の挿入/削除で
+//       崩れた場合に自前で回転してはいけない(balance() が merge_sub に委ねる理由).
 // is_leaf() は sz==1(葉は必ず重み 1, 内部は必ず >=2). union の判別子.
 // NIL は「空木の root」だけを意味する(子ハンドルが NIL になることは無い).
 // ordered 木は key 一意(map 意味論). 同じ key の insert は値を置換, meld は f で値を統合.
@@ -30,6 +33,7 @@ struct router {
 }; // lo=部分木の最小 key, sep=右部分木の最小 key(降下の区分キー).
 template<>
 struct router<void> {};
+struct no_wl {}; // wl を持たない node の placeholder(空型).
 } // namespace wblt_impl
 
 using bbst::Mode;
@@ -60,6 +64,12 @@ struct weight_balanced_leafy_tree {
   static_assert(!ordered || is_invocable_r_v<bool, decltype(comp), Key, Key>, "comp must work as bool(Key,Key)");
   // union に入るのは Key のみ(val は union 外). 非 trivial Key は node の生存管理が壊れるため非対応.
   static_assert(!ordered || is_trivially_destructible_v<Key>, "Key must be trivially destructible");
+  // clone(=木のコピー)は node をコピー構築する. Key の copy ctor が非 trivial だとエラーになるので弾く.
+  static_assert(!ordered || is_trivially_copy_constructible_v<Key>, "Key must be trivially copy constructible");
+  // key は代入で書き込む(new_leaf_key の lf.key, update の in.r.lo/sep). 代入できれば十分で trivial 性は不要.
+  static_assert(!ordered || is_copy_assignable_v<Key>, "Key must be copy assignable");
+  // node ctor は lf{} / in{{lc,rc},{}} で key/router を値初期化する. 既定構築できない Key は弾く.
+  static_assert(!ordered || is_default_constructible_v<Key>, "Key must be default constructible");
   static_assert(!lazy && !beats, "lazy/beats not implemented yet (Phase 2/3)");
 
 public:
@@ -70,9 +80,16 @@ public:
   // node の定義より前に必要(node が子ハンドルを持つ)ため, pool<node> を実体化せずに
   // 参照できる T 非依存の別名 static_pool_id を使う(pool<node> の id_type と同じ型).
   using id_type = static_pool_id;
-  struct node {
+  // WL=true なら「左の子の重み」wl を持つ(index 降下で左の子の cache line を触らずに済む).
+  // ただし wl を足すと node が大きくなるレイアウト(Value=int 系: 16→20B, 24→28B, 32→40B)では
+  // key 降下が 10〜20% 遅くなり index 側の利得も消えるので, sizeof が変わらないとき(padding を吸収
+  // できる Value=long long 系: 24/32/40B)だけ持つ. 判定は下の has_wl(sizeof 比較)で自動.
+  template<bool WL>
+  struct node_impl {
     Value val;
     int sz; // 部分木の葉数 = 重み. sz==1 ⟺ 葉.
+    // 内部: 左の子の重み. 葉: 未使用(0). WL=false では空型(0 バイト).
+    [[no_unique_address]] conditional_t<WL, int, wblt_impl::no_wl> wl;
     union {
       [[no_unique_address]] wblt_impl::leafkey<RawKey> lf;
       struct {
@@ -83,15 +100,19 @@ public:
     // union のどのメンバも活性でない状態への代入(=生存期間未開始への書き込み)を避けるため,
     // 必ず mem-init で片方の variant member を構築する. static_pool::alloc が construct_at で呼ぶ.
     // 葉として構築. ordered の key は new_leaf_key が構築後に代入(lf は生存開始済みなので合法).
-    explicit constexpr node(Value const& v): val(v), sz(1), lf{} {}
-    // 内部として構築. val/sz/router は直後の update() が埋める.
-    constexpr node(id_type lc, id_type rc): sz(0), in{{lc, rc}, {}} {}
+    explicit constexpr node_impl(Value const& v): val(v), sz(1), wl{}, lf{} {}
+    // 内部として構築. val/sz/wl/router は直後の update() が埋める.
+    constexpr node_impl(id_type lc, id_type rc): sz(0), wl{}, in{{lc, rc}, {}} {}
   };
+  static constexpr bool has_wl = sizeof(node_impl<true>) == sizeof(node_impl<false>);
+  using node = node_impl<has_wl>;
 
 private:
   static constexpr id_type NIL = static_pool<node, N>::NIL;
   // 平衡パラメータ (delta, gamma) = (Dn/Dd, Gn/Gd) = (5/2, 3/2). 有理数なので交差乗算で比較(整数のみ).
   static constexpr int Dn = 5, Dd = 2, Gn = 3, Gd = 2;
+  // 重み(sz)は int. like/single は交差乗算するため.
+  static_assert(N <= size_t(INT_MAX) / Dn, "N too large: Dn*N must fit in int (weight comparison overflows)");
   // like(x,y): x <= delta*y ⟺ Dd*x <= Dn*y(x が y の delta 倍以下=平衡側). 否定が too_heavy.
   static constexpr bool like(int x, int y) { return Dd * x <= Dn * y; }
   // single(x,y): x <= gamma*y ⟺ Gd*x <= Gn*y(single rotation で足りる判定).
@@ -107,6 +128,11 @@ private:
   static constexpr bool is_leaf(id_type i) { return pool[i].sz == 1; }
   static constexpr int w(id_type i) { return pool[i].sz; }
   static constexpr id_type child(id_type u, bool d) { return pool[u].in.ch[d]; }
+  // 内部ノード u の左の子の重み. wl を持つ node ならそれを読む(左の子に触らない), 無ければ左の子の sz.
+  static constexpr int wleft(id_type u) {
+    if constexpr(has_wl) return pool[u].wl;
+    else return w(child(u, 0));
+  }
   static constexpr bool eqk(Key const& a, Key const& b) { return !comp(a, b) && !comp(b, a); }
   // 部分木の最小 key(ordered 時のみ).
   static constexpr Key const& lo(id_type i) { return is_leaf(i) ? pool[i].lf.key : pool[i].in.r.lo; }
@@ -123,8 +149,15 @@ private:
     node& n = pool[u];
     id_type l = n.in.ch[0], r = n.in.ch[1];
     n.sz = pool[l].sz + pool[r].sz;
+    if constexpr(has_wl) n.wl = pool[l].sz;
     n.val = Q(pool[l].val, pool[r].val);
     if constexpr(ordered) n.in.r.lo = lo(l), n.in.r.sep = lo(r);
+  }
+  // 集約だけを引き上げる(sz/router 据え置き). 値だけ書き換える pull-up 専用で,
+  // 構造も key も変わらない update_sub/update_key/upsert_sub のヒット時に使う.
+  static constexpr void update_val(id_type u) {
+    node& n = pool[u];
+    n.val = Q(pool[n.in.ch[0]].val, pool[n.in.ch[1]].val);
   }
   // l,r を子に持つ内部ノードを新規作成(平衡は呼び出し側が保証).
   static constexpr id_type make(id_type l, id_type r) {
@@ -143,7 +176,7 @@ private:
   template<class... Args>
   static constexpr id_type merge(id_type a, Args... rest) { return merge(a, merge(rest...)); }
   static constexpr id_type merge_sub(id_type l, id_type r) { // l,r ともに非 NIL.
-    if(!like(w(l), w(r))) {                                     // l が重すぎ(w(l)>delta*w(r)): l の右 spine を降下.
+    if(!like(w(l), w(r))) {                                  // l が重すぎ(w(l)>delta*w(r)): l の右 spine を降下.
       id_type a = child(l, 0), c = merge_sub(child(l, 1), r);
       if(like(w(c), w(a))) {
         pool[l].in.ch[1] = c, update(l);
@@ -181,6 +214,18 @@ private:
     }
     return make(l, r);
   }
+  // 子の一方だけが 1 要素分 増減した直後の内部ノード u を平衡化し, 新しい部分木の根を返す.
+  // 崩れていない通常ケースは update だけ(pool の確保・解放ゼロ)で済ませる.
+  // 崩れた場合だけ u を捨てて merge_sub に委ねる.
+  static constexpr id_type balance(id_type u) {
+    id_type l = pool[u].in.ch[0], r = pool[u].in.ch[1];
+    if(like(w(l), w(r)) && like(w(r), w(l))) {
+      update(u);
+      return u;
+    }
+    pool.free(u);
+    return merge_sub(l, r);
+  }
   // u を先頭 k 個 / 残りに分ける(index split). u を消費して 2 根を返す. O(logN).
   static constexpr pair<id_type, id_type> split(id_type u, int k) {
     if(u == NIL) return {NIL, NIL};
@@ -190,7 +235,7 @@ private:
   }
   static constexpr pair<id_type, id_type> split_sub(id_type u, int k) { // 0<k<w(u).
     id_type l = child(u, 0), r = child(u, 1);
-    int wl = w(l);
+    int wl = has_wl ? wleft(u) : w(l); // wl 無しでは読み込み済みの l を使う(u を読み直すと codegen が変わる).
     pool.free(u);
     if(k < wl) {
       auto [a, b] = split_sub(l, k);
@@ -248,38 +293,61 @@ private:
   // ---- モード横断の下請け(index を扱うコア) ----
   static constexpr id_type leaf_at(id_type u, int k) { // index k の葉ハンドル.
     while(!is_leaf(u)) {
-      int wl = w(child(u, 0));
+      int wl = wleft(u);
       if(k < wl) u = child(u, 0);
       else k -= wl, u = child(u, 1);
     }
     return u;
   }
-  // index k の値を g(値) に変更し祖先を pull-up(set は定数 g, modify は f). key 側 update_key と対.
-  static constexpr void update_sub(id_type u, int k, auto const& g) {
-    if(is_leaf(u)) {
-      pool[u].val = g(pool[u].val);
-      return;
+  // index k の葉まで降り, 通った内部ノードを path に積んで段数を返す(降下系の共有).
+  // 戻り時に k は葉内の相対 index(0 or 負)に潰れている. u は降下後の葉になる.
+  static constexpr int descend_at(id_type& u, int& k, id_type* path, bool* dir) {
+    int d = 0;
+    while(!is_leaf(u)) {
+      int wl = wleft(u);
+      bool b = k >= wl; // k==wl は右部分木の先頭.
+      if(b) k -= wl;
+      assert(d < STACK_CAP);
+      path[d] = u, dir[d] = b, ++d, u = child(u, b);
     }
-    int wl = w(child(u, 0));
-    if(k < wl) update_sub(child(u, 0), k, g);
-    else update_sub(child(u, 1), k - wl, g);
-    update(u);
+    return d;
   }
-  static constexpr id_type erase_at(id_type u, int k) { // index k の葉を削除. 1 パス. O(logN).
-    if(is_leaf(u)) {
-      pool.free(u);
-      return NIL;
-    }
-    id_type l = child(u, 0), r = child(u, 1);
-    int wl = w(l);
+  // index k の値を g(値) に変更し祖先を pull-up(set は定数 g, modify は f). key 側 update_key と対.
+  // 構造も key も動かないので巻き戻しは update_val だけ(sz/router の書き直しを省く).
+  static constexpr void update_sub(id_type u, int k, auto const& g) {
+    array<id_type, STACK_CAP> path;
+    array<bool, STACK_CAP> dir;
+    int d = descend_at(u, k, path.data(), dir.data());
+    pool[u].val = g(pool[u].val);
+    while(d--) update_val(path[d]);
+  }
+  // index k の位置に葉 lf を挿入する一降下(u は非 NIL). 各段は子ハンドルの差し替えと balance だけ. O(logN).
+  static constexpr id_type insert_at(id_type u, int k, id_type lf) {
+    array<id_type, STACK_CAP> path;
+    array<bool, STACK_CAP> dir;
+    int d = descend_at(u, k, path.data(), dir.data());
+    id_type c = k <= 0 ? make(lf, u) : make(u, lf);
+    while(d--) pool[path[d]].in.ch[dir[d]] = c, c = balance(path[d]);
+    return c;
+  }
+  // index k の葉を削除する一降下. 平衡が保たれている段では確保も解放もしない. O(logN).
+  // 「子が葉だったので畳む」のは最下段だけなので, 巻き戻しループの外に出す.
+  static constexpr id_type erase_at(id_type u, int k) {
+    array<id_type, STACK_CAP> path;
+    array<bool, STACK_CAP> dir;
+    int d = descend_at(u, k, path.data(), dir.data());
     pool.free(u);
-    if(k < wl) return merge(erase_at(l, k), r);
-    return merge(l, erase_at(r, k - wl));
+    if(d == 0) return NIL; // 根が葉だった.
+    --d;
+    id_type c = child(path[d], !dir[d]); // free の前に兄弟を読む.
+    pool.free(path[d]);
+    while(d--) pool[path[d]].in.ch[dir[d]] = c, c = balance(path[d]);
+    return c;
   }
   static constexpr Value prod_sub(id_type u, int l, int r) { // [l,r)∩[0,w(u)) の総積(非空前提).
     if(l <= 0 && r >= w(u)) return pool[u].val;
     id_type a = child(u, 0), b = child(u, 1);
-    int wl = w(a);
+    int wl = has_wl ? wleft(u) : w(a); // 同上.
     if(r <= wl) return prod_sub(a, l, r);
     if(l >= wl) return prod_sub(b, l - wl, r - wl);
     return Q(prod_sub(a, l, wl), prod_sub(b, 0, r - wl));
@@ -294,7 +362,7 @@ private:
       }
     }
     if(is_leaf(u)) return 0;
-    int wl = w(child(u, 0));
+    int wl = wleft(u);
     if(l >= wl) return wl + mr(child(u, 1), l - wl, acc, f);
     int lc = mr(child(u, 0), l, acc, f);
     if(lc < wl) return lc;
@@ -310,7 +378,7 @@ private:
       }
     }
     if(is_leaf(u)) return 1;
-    int wl = w(child(u, 0));
+    int wl = wleft(u);
     if(r <= wl) return ml(child(u, 0), r, acc, f);
     int rc = ml(child(u, 1), r - wl, acc, f);
     if(rc > 0) return wl + rc;
@@ -341,53 +409,147 @@ private:
       Key const& sp = pool[u].in.r.sep;
       bool go_left = le ? comp(k, sp) : !comp(sp, k);
       if(go_left) u = child(u, 0);
-      else idx += w(child(u, 0)), u = child(u, 1);
+      else idx += wleft(u), u = child(u, 1);
     }
     Key const& lk = pool[u].lf.key;
     if(le ? !comp(k, lk) : comp(lk, k)) ++idx;
     return idx;
   }
-  // key=k が入るべき葉と, その葉の index を 1 降下で返す(exact search). key 一意なので唯一.
-  static constexpr pair<id_type, int> find_leaf_key(id_type u, Key const& k) {
-    int idx = 0;
+  // key=k が入るべき葉まで降り, 通った内部ノードを path に積んで段数を返す(更新系降下の共有).
+  // find_leaf と同じ降下だが, 巻き戻しに使う経路と方向を記録する点だけが違う.
+  static constexpr int descend_key(id_type& u, Key const& k, id_type* path, bool* dir) {
+    int d = 0;
     while(!is_leaf(u)) {
-      if(comp(k, pool[u].in.r.sep)) u = child(u, 0);
-      else idx += w(child(u, 0)), u = child(u, 1);
+      bool b = !comp(k, pool[u].in.r.sep);
+      assert(d < STACK_CAP);
+      path[d] = u, dir[d] = b, ++d, u = child(u, b);
     }
-    return {u, idx};
+    return d;
+  }
+  // key=k が入るべき葉を 1 降下で返す(exact search). key 一意なので唯一.
+  // index は返さない: index を数えるには右へ降りるたび左の子の重みを読む必要があり,
+  // 参照系(contains/get/get_or)では触らずに済む cache line を無駄に触ることになるため.
+  static constexpr id_type find_leaf(id_type u, Key const& k) {
+    while(!is_leaf(u)) u = child(u, !comp(k, pool[u].in.r.sep));
+    return u;
+  }
+  // key=k の葉を探す一降下. 見つかれば on_hit(葉) を呼び木構造は変えない(祖先の集約だけ更新),
+  // 無ければ make_leaf() が返す葉をその位置に挿入して平衡を保つ. u は非 NIL. O(logN).
+  // upsert / modify_or / insert_leaf の共通実装.
+  static constexpr id_type upsert_sub(id_type u, Key const& k, auto const& on_hit, auto const& make_leaf) {
+    array<id_type, STACK_CAP> path;
+    array<bool, STACK_CAP> dir;
+    int d = descend_key(u, k, path.data(), dir.data());
+    Key const& lk = pool[u].lf.key;
+    bool klt = comp(k, lk), lgt = comp(lk, k);
+    if(!klt && !lgt) { // key 一致: 葉をその場で書き換えるので, 引数が この葉を指していても安全.
+      on_hit(u);       // 構造が変わらないので balance は不要, 集約だけ引き上げる.
+      for(int i = d; i--;) update_val(path[i]);
+      return d ? path[0] : u;
+    }
+    id_type c = klt ? make(make_leaf(), u) : make(u, make_leaf());
+    while(d--) pool[path[d]].in.ch[dir[d]] = c, c = balance(path[d]);
+    return c;
+  }
+  // key=k の葉を削除する一降下. 見つかれば ok=true にして削除後の根を返す. 無ければ u をそのまま返す.
+  static constexpr id_type erase_key(id_type u, Key const& k, bool& ok) {
+    array<id_type, STACK_CAP> path;
+    array<bool, STACK_CAP> dir;
+    id_type r0 = u;
+    int d = descend_key(u, k, path.data(), dir.data());
+    if(!eqk(k, pool[u].lf.key)) return r0; // 無かった: 木は一切変えていないので元の根を返す.
+    ok = true, pool.free(u);
+    if(d == 0) return NIL; // 根が葉だった.
+    --d;
+    id_type c = child(path[d], !dir[d]); // free の前に兄弟を読む.
+    pool.free(path[d]);
+    while(d--) pool[path[d]].in.ch[dir[d]] = c, c = balance(path[d]);
+    return c;
   }
   // key=k の葉の val を g(val) に変更(1 降下で祖先 pull-up). 見つかったか返す(set/modify 共有).
+  // 構造も key も動かないので巻き戻しは update_val だけ(sz/router の書き直しを省く).
   static constexpr bool update_key(id_type u, Key const& k, auto const& g) {
-    if(is_leaf(u)) {
-      if(!eqk(k, pool[u].lf.key)) return false;
-      pool[u].val = g(pool[u].val);
-      return true;
-    }
-    bool ok = comp(k, pool[u].in.r.sep) ? update_key(child(u, 0), k, g) : update_key(child(u, 1), k, g);
-    if(ok) update(u);
-    return ok;
+    array<id_type, STACK_CAP> path;
+    array<bool, STACK_CAP> dir;
+    int d = descend_key(u, k, path.data(), dir.data());
+    if(!eqk(k, pool[u].lf.key)) return false;
+    pool[u].val = g(pool[u].val);
+    while(d--) update_val(path[d]);
+    return true;
   }
-  // key ∈ [kl,kr) の総積(1 降下). khi=u の keys の strict upper(nullptr=+inf, key 一意前提).
-  static constexpr Value prod_key(id_type u, Key const& kl, Key const& kr, Key const* khi) {
-    Key const& klo = lo(u);
-    if(!comp(klo, kr)) return e;                                     // klo>=kr: 全て範囲外(上).
-    if(khi && !comp(kl, *khi)) return e;                             // *khi<=kl: 全て範囲外(下).
-    if(!comp(klo, kl) && khi && !comp(kr, *khi)) return pool[u].val; // 全部含む.
-    if(is_leaf(u)) return comp(klo, kl) ? e : pool[u].val;           // 部分葉: klo<kl 除外.
-    return Q(prod_key(child(u, 0), kl, kr, &pool[u].in.r.sep), prod_key(child(u, 1), kl, kr, khi));
-  }
-  // key<s | key==s(単一 or NIL) | key>s に分ける.
-  static constexpr tuple<id_type, id_type, id_type> split_key3(id_type u, Key const& s) {
-    auto [l, ge] = split_key(u, s);
-    if(ge != NIL && eqk(lo(ge), s)) {
-      auto [eq, gt] = split(ge, 1);
-      return {l, eq, gt};
+  // u 内の key>=kl の接尾辞積(左端固定の反復降下). 左へ降りるたび右の子を丸ごと前置する.
+  static constexpr Value suffix_key(id_type u, Key const& kl) {
+    Value acc = e;
+    while(!is_leaf(u)) {
+      if(!comp(kl, pool[u].in.r.sep)) u = child(u, 1); // sep<=kl: 左は全て範囲外.
+      else acc = Q(pool[child(u, 1)].val, acc), u = child(u, 0);
     }
-    return {l, NIL, ge};
+    return comp(pool[u].lf.key, kl) ? acc : Q(pool[u].val, acc);
+  }
+  // u 内の key<kr の接頭辞積(右端固定の反復降下). 右へ降りるたび左の子を丸ごと後置する.
+  static constexpr Value prefix_key(id_type u, Key const& kr) {
+    Value acc = e;
+    while(!is_leaf(u)) {
+      if(!comp(pool[u].in.r.sep, kr)) u = child(u, 0); // sep>=kr: 右は全て範囲外.
+      else acc = Q(acc, pool[child(u, 0)].val), u = child(u, 1);
+    }
+    return comp(pool[u].lf.key, kr) ? Q(acc, pool[u].val) : acc;
+  }
+  // key ∈ [kl,kr) の総積. 分岐ノードまで降りてから左右 1 本ずつ(index 版 prod_sub と同じ構造).
+  // 前提 kl<kr かつ u 非 NIL. 積の順序は Q(左の接尾辞, 右の接頭辞) で左→右が保たれる.
+  static constexpr Value prod_key(id_type u, Key const& kl, Key const& kr) {
+    while(!is_leaf(u)) {
+      Key const& sp = pool[u].in.r.sep;
+      if(!comp(kl, sp)) u = child(u, 1);                                       // sep<=kl: 範囲は全て右部分木.
+      else if(!comp(sp, kr)) u = child(u, 0);                                  // sep>=kr: 範囲は全て左部分木.
+      else return Q(suffix_key(child(u, 0), kl), prefix_key(child(u, 1), kr)); // 分岐点.
+    }
+    Key const& lk = pool[u].lf.key; // 分岐せず葉に着いた: 単独で範囲判定.
+    return !comp(lk, kl) && comp(lk, kr) ? pool[u].val : e;
+  }
+  // key>=kl を左端に固定した木上二分探索(一降下). 戻り値は u 内での index. acc は流入積.
+  // mr(index 版)と同じ形だが「u の key が全て kl 以上か」を router lo で O(1) 判定するので,
+  // lower_bound を別に走らせる必要がない. 戻り値が w(u) なら「u を全部使い切った(継続可)」.
+  static constexpr int mr_key(id_type u, Key const& kl, Value& acc, auto const& f) {
+    if(!comp(lo(u), kl)) { // u の key は全て範囲内.
+      Value na = Q(acc, pool[u].val);
+      if(f(na)) {
+        acc = na;
+        return w(u);
+      }
+      if(is_leaf(u)) return 0;
+    } else if(is_leaf(u)) return 1; // key<kl: 範囲より前なので丸ごと読み飛ばす.
+    int wl = wleft(u);
+    // sep<=kl なら左部分木の key は全て kl 未満(左は丸ごと範囲前).
+    if(!comp(kl, pool[u].in.r.sep)) return wl + mr_key(child(u, 1), kl, acc, f);
+    int lc = mr_key(child(u, 0), kl, acc, f);
+    if(lc < wl) return lc;
+    return wl + mr_key(child(u, 1), kl, acc, f);
+  }
+  // key<kr を右端に固定した木上二分探索(一降下). khi=u の key の strict upper(nullptr=+inf).
+  // 呼び出し時, u の最小 key は kr 未満であること(=範囲が非空)を保証する.
+  static constexpr int ml_key(id_type u, Key const& kr, Value& acc, auto const& f, Key const* khi) {
+    // u が丸ごと範囲内(全 key<kr)か. 葉は key を直接見る, 内部は親から渡された上界で判定する.
+    if(is_leaf(u) ? comp(pool[u].lf.key, kr) : (khi && !comp(kr, *khi))) {
+      Value na = Q(pool[u].val, acc);
+      if(f(na)) {
+        acc = na;
+        return 0;
+      }
+    }
+    if(is_leaf(u)) return 1;
+    int wl = wleft(u);
+    Key const& sp = pool[u].in.r.sep;
+    if(!comp(sp, kr)) return ml_key(child(u, 0), kr, acc, f, &sp); // sep>=kr: 右は全て範囲外.
+    int rc = ml_key(child(u, 1), kr, acc, f, khi);
+    if(rc > 0) return wl + rc;
+    return ml_key(child(u, 0), kr, acc, f, &sp);
   }
   static constexpr pair<id_type, id_type> split_key(id_type u, Key const& s) { // key<s | key>=s.
     if(u == NIL) return {NIL, NIL};
-    if(is_leaf(u)) return comp(pool[u].lf.key, s) ? pair<id_type, id_type>{u, NIL} : pair<id_type, id_type>{NIL, u};
+    // 部分木の最小 key が s 以上なら丸ごと右. 葉の「右へ」もここが兼ねる.
+    if(!comp(lo(u), s)) return {NIL, u};
+    if(is_leaf(u)) return {u, NIL}; // 葉で lo(u)<s: 丸ごと左.
     id_type l = child(u, 0), r = child(u, 1);
     Key sp = pool[u].in.r.sep; // free 後に使うのでコピー必須.
     pool.free(u);
@@ -398,11 +560,13 @@ private:
     auto [a, b] = split_key(r, s);
     return {merge(l, a), b};
   }
-  // 葉 lf(単一要素)を map t に統合挿入. key 衝突時 lf.val = f(lf.val, 既存.val). O(log|t|).
+  // 葉 lf(単一要素)を map t に統合挿入(一降下). key 衝突時は既存葉に f(lf.val, 既存.val) を書いて
+  // lf を解放する. O(logN).
   static constexpr id_type insert_leaf(id_type t, id_type lf, auto const& f) {
-    auto [l, m, r] = split_key3(t, pool[lf].lf.key);
-    if(m != NIL) pool[lf].val = f(pool[lf].val, pool[m].val), pool.free(m);
-    return merge(l, lf, r);
+    if(t == NIL) return lf;
+    Key k = pool[lf].lf.key; // 衝突時に lf を解放するので key はコピーで持つ.
+    auto hit = [&](id_type u) { pool[u].val = f(pool[lf].val, pool[u].val), pool.free(lf); };
+    return upsert_sub(t, k, hit, [&] { return lf; });
   }
   // key 一意の map として union. どちらかが葉ならそれを他方へ挿入(高速化). 両内部なら大きい方で split.
   static constexpr id_type meld_sub(id_type a, id_type b, auto const& f) {
@@ -431,6 +595,7 @@ private:
     id_type l = child(u, 0), r = child(u, 1);
     pair<Key, Key> pl = validate_sub(l), pr = validate_sub(r);
     assert(w(u) == w(l) + w(r) && "sz != child sz sum");
+    if constexpr(has_wl) assert(pool[u].wl == w(l) && "wl != left child weight");
     assert(like(w(l), w(r)) && like(w(r), w(l)) && "weight-balance violated");
     if constexpr(equality_comparable<Value>)
       assert(pool[u].val == Q(pool[l].val, pool[r].val) && "val != Q(children)");
@@ -444,6 +609,14 @@ private:
       return {};
     }
   }
+
+  // 根ハンドルを受け取って所有する private ctor のタグ(split_off の返り値用).
+  // tag を挟むのは, 1 引数 ctor にすると id_type から木への変換候補ができてしまい,
+  // 借り物の部分木ハンドル(child()/merge()/split() の戻り)が黙って「所有する木」に化けるため.
+  // 加えて id_type は通常ビルドで uint32_t, LION_DEBUG では構造体なので,
+  // 1 引数 ctor だとそのミスが通常ビルドでだけコンパイルできてしまう(検出がビルド依存になる).
+  struct from_root_t {};
+  constexpr weight_balanced_leafy_tree(from_root_t, id_type r): root(r) {}
 
 public:
   // static_pool::fast への参照. true で自動破棄を省略(=生存要素の Value dtor を捨てる高速化).
@@ -532,8 +705,8 @@ public:
     requires(!ordered)
   {
     assert(0 <= k && k <= size());
-    auto [l, r] = split(root, k);
-    root = merge(l, new_leaf(v), r);
+    id_type lf = new_leaf(v);
+    root = root == NIL ? lf : insert_at(root, k, lf);
     validate();
   }
   // O(logN) index k の要素を削除.
@@ -574,6 +747,52 @@ public:
     return ret;
   }
 
+  // ===== 列の分割・連結(sequence). merge/split のコアをそのまま公開する. =====
+  // O(logN) 先頭 k 個を this に残し, index k 以降を新しい木として返す.
+  constexpr weight_balanced_leafy_tree split_off(int k)
+    requires(!ordered)
+  {
+    assert(0 <= k && k <= size());
+    auto [l, r] = split(root, k);
+    root = l;
+    validate();
+    weight_balanced_leafy_tree ret(from_root_t{}, r);
+    ret.validate();
+    return ret;
+  }
+  // O(logN) ot をこの木の末尾に連結(ot は空になる).
+  constexpr void concat(weight_balanced_leafy_tree& ot)
+    requires(!ordered)
+  {
+    assert(this != &ot);
+    root = merge(root, ot.root), ot.root = NIL;
+    validate();
+  }
+  // O(logN) ot を index k の手前に丸ごと差し込む(ot は空になる).
+  constexpr void insert(int k, weight_balanced_leafy_tree& ot)
+    requires(!ordered)
+  {
+    assert(0 <= k && k <= size() && this != &ot);
+    if(ot.root == NIL) return;
+    auto [a, b] = split(root, k);
+    root = merge(a, ot.root, b); // 可変長 merge.
+    ot.root = NIL;
+    validate();
+  }
+  // O((r-l) + logN) index [l,r) をまとめて削除.
+  // 内訳は split/merge が O(logN), 切り出した部分木の node を pool に返す free_all が O(r-l).
+  constexpr void erase(int l, int r)
+    requires(!ordered)
+  {
+    assert(0 <= l && l <= r && r <= size());
+    if(l >= r) return;
+    auto [a, bc] = split(root, l);
+    auto [b, c] = split(bc, r - l);
+    if(b != NIL) free_all(b);
+    root = merge(a, c);
+    validate();
+  }
+
   // ===== ordered-key API(順序集合, key 一意=map 意味論). =====
   // O(logN) key<k の要素数(lower_bound の index).
   constexpr int lower_bound(Key const& k) const
@@ -590,17 +809,13 @@ public:
   // O(logN) key=k が存在するか.
   constexpr bool contains(Key const& k) const
     requires(ordered)
-  {
-    if(root == NIL) return false;
-    auto [u, idx] = find_leaf_key(root, k);
-    return eqk(k, pool[u].lf.key);
-  }
+  { return root != NIL && eqk(k, pool[find_leaf(root, k)].lf.key); }
   // O(logN) key=k の値. 存在しなければ assert 失敗.
   constexpr Value const& get(Key const& k) const
     requires(ordered)
   {
     assert(root != NIL);
-    auto [u, idx] = find_leaf_key(root, k);
+    id_type u = find_leaf(root, k);
     assert(eqk(k, pool[u].lf.key) && "get(Key): key not found");
     return pool[u].val;
   }
@@ -609,7 +824,7 @@ public:
     requires(ordered)
   {
     if(root == NIL) return def;
-    auto [u, idx] = find_leaf_key(root, k);
+    id_type u = find_leaf(root, k);
     return eqk(k, pool[u].lf.key) ? pool[u].val : def;
   }
   // O(logN) key=k の値を v に. 存在しなければ assert 失敗.
@@ -634,47 +849,68 @@ public:
   template<class F>
     requires(ordered && is_invocable_r_v<Value, F, Value>)
   constexpr void modify_or(Key const& k, F const& f) {
-    if(root == NIL || !update_key(root, k, f)) { // 不在 → key<k | key>k に分けて f(e) を挿入.
-      auto [l, r] = split_key(root, k);
-      root = merge(l, new_leaf_key(k, f(e)), r);
-    }
+    auto hit = [&](id_type u) { pool[u].val = f(pool[u].val); };
+    auto mk = [&] { return new_leaf_key(k, f(e)); };
+    root = root == NIL ? mk() : upsert_sub(root, k, hit, mk);
     validate();
   }
   // O(logN) key=k を挿入. 既に存在すれば値を v に置換(update-or-insert なので名前は upsert).
+  // 一降下で既存葉をその場更新する.
   constexpr void upsert(Key const& k, Value const& v)
     requires(ordered)
   {
-    auto [l, eq, r] = split_key3(root, k);
-    if(eq != NIL) pool.free(eq);
-    root = merge(l, new_leaf_key(k, v), r);
+    auto hit = [&](id_type u) { pool[u].val = v; };
+    auto mk = [&] { return new_leaf_key(k, v); };
+    root = root == NIL ? mk() : upsert_sub(root, k, hit, mk);
     validate();
   }
-  // O(logN) key=k を削除. 存在したかを返す.
+  // O(logN) key=k を削除. 存在したかを返す. 探索と削除を 1 本にまとめた一降下.
   constexpr bool erase(Key const& k)
     requires(ordered)
   {
     if(root == NIL) return false;
-    auto [u, idx] = find_leaf_key(root, k);
-    if(!eqk(k, pool[u].lf.key)) return false;
-    root = erase_at(root, idx);
+    bool erased = false;
+    root = erase_key(root, k, erased);
     validate();
-    return true;
+    return erased;
+  }
+  // O(logN) key>=s の要素を切り離して新しい木として返す(this には key<s だけが残る).
+  constexpr weight_balanced_leafy_tree split_off(Key const& s)
+    requires(ordered)
+  {
+    auto [l, r] = split_key(root, s);
+    root = l;
+    validate();
+    weight_balanced_leafy_tree ret(from_root_t{}, r);
+    ret.validate();
+    return ret;
   }
   // O(logN) key ∈ [kl,kr) の総積(1 降下).
   constexpr Value prod(Key const& kl, Key const& kr) const
     requires(ordered)
   {
     if(root == NIL || !comp(kl, kr)) return e;
-    return prod_key(root, kl, kr, nullptr);
+    return prod_key(root, kl, kr);
   }
   // O(logN) key=kl 以上を左端に固定した木上二分探索. 返り値は index.
+  // lower_bound の降下と二分探索の降下を融合した一降下(左端判定は router lo で O(1)).
   template<class F>
     requires(ordered && is_invocable_r_v<bool, F, Value>)
-  constexpr int max_right(F const& f, Key const& kl) const { return max_right_at(lower_bound(kl), f); }
-  // O(logN) key=kr 未満を右端に固定した木上二分探索. 返り値は index.
+  constexpr int max_right(F const& f, Key const& kl) const {
+    assert(f(e));
+    if(root == NIL) return 0;
+    Value acc = e;
+    return mr_key(root, kl, acc, f);
+  }
+  // O(logN) key=kr 未満を右端に固定した木上二分探索. 返り値は index. 同じく一降下.
   template<class F>
     requires(ordered && is_invocable_r_v<bool, F, Value>)
-  constexpr int min_left(F const& f, Key const& kr) const { return min_left_at(lower_bound(kr), f); }
+  constexpr int min_left(F const& f, Key const& kr) const {
+    assert(f(e));
+    if(root == NIL || !comp(lo(root), kr)) return 0; // 全 key が kr 以上: 範囲が空.
+    Value acc = e;
+    return ml_key(root, kr, acc, f, nullptr);
+  }
   // O(M log(1+N/M)) ot を this に union. key 衝突は f で統合(内部で small-to-large するため
   // 引数順は不定 → f は可換推奨. 既定 Q). ot は空に. f は Value(Value,Value).
   template<class F = decltype(Q)>

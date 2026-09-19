@@ -40,6 +40,20 @@ int Fc = 0;
 auto fail = [](char const* m) { cerr << "FAIL: " << m << "\n"; ++Fc; };
 Af rnd_af(mt19937& rng) { return {(ll)(rng() % MOD), (ll)(rng() % MOD)}; }
 
+// 列 / map を ground truth と丸ごと照合(split/merge 系テストで繰り返し使う).
+bool seq_eq(Seq const& t, vector<Af> const& v) {
+  if(t.size() != (int)v.size() || t.get_vec() != v) return false;
+  Af w = af_id();
+  for(Af x: v) w = af_comp(w, x);
+  return t.all_prod() == w;
+}
+bool ord_eq(Ord const& t, map<int, Af> const& mp) {
+  if(t.size() != (int)mp.size()) return false;
+  vector<pair<int, Af>> gv, wv(mp.begin(), mp.end());
+  for(auto [k, v]: t.get_vec_pair()) gv.emplace_back(k, v);
+  return gv == wv;
+}
+
 // prod([l,r)) が左→右の合成であること(可換化バグを検出).
 void order_test() {
   vector<Af> v = {{2, 3}, {5, 7}, {11, 13}, {17, 19}};
@@ -229,6 +243,13 @@ void binsearch_test(mt19937& rng) {
       // key=2l は index l の要素 → lower_bound(2l)==l. l==n なら該当なしで lower_bound==n.
       if(o.max_right(f, 2 * l) != want_mr(l)) fail("ord max_right(f,Key)");
       if(o.min_left(f, 2 * r) != want_ml(r)) fail("ord min_left(f,Key)");
+      // 木に無い key(奇数)や範囲外の key でも lower_bound 版と一致すること.
+      // (key 版は lower_bound の降下と融合した一降下なので, 境界が葉の途中に来る形を突く.)
+      int kq = (int)(rng() % (2 * n + 5)) - 2;
+      int lb = 0;
+      while(lb < n && 2 * lb < kq) ++lb;
+      if(o.max_right(f, kq) != want_mr(lb)) fail("ord max_right(f,Key) arbitrary");
+      if(o.min_left(f, kq) != want_ml(lb)) fail("ord min_left(f,Key) arbitrary");
     }
     // 引数省略(既定 l=0 / r=size).
     if(t.max_right(f) != want_mr(0)) fail("seq max_right default");
@@ -429,6 +450,210 @@ void balance_test() {
     check("insert-middle", t.height());
     t.clear();
   }
+  { // split/concat を繰り返した後も高さが O(log n) に保たれるか.
+    // split_merge_test は内容(get_vec / prod)しか見ないので, 「答えは合うが平衡が劣化して
+    // 高さが線形に伸びる」バグはそこを素通りする. ここで形状側を押さえる.
+#ifdef LION_DEBUG
+    int m = 300; // 各操作の内部 validate() が O(N) なので回数を落とす.
+#else
+    int m = 20000;
+#endif
+    mt19937 rng(7);
+    SeqS t;
+    for(int i = 0; i < n; ++i) t.insert(t.size(), 1);
+    for(int i = 0; i < m; ++i) { // ランダム位置で切って前後を入れ替える.
+      SeqS u = t.split_off((int)(rng() % (t.size() + 1)));
+      t.insert(0, u);
+    }
+    check("split-concat-random", t.height());
+    for(int i = 0; i < m; ++i) { // 先頭 1 要素だけを末尾へ回し続ける(最も偏った split/merge の反復).
+      SeqS u = t.split_off(1);   // t = 先頭 1 個, u = 残り.
+      u.concat(t), t = std::move(u);
+    }
+    check("split-concat-rotate1", t.height());
+    t.clear();
+  }
+}
+
+// 引数が「その木の中の node」を指していても壊れないこと.
+void alias_test(mt19937& rng) {
+  for(int iter = 0; iter < 300 && Fc <= 10; ++iter) {
+    int n = 1 + rng() % 30;
+    Ord t;
+    map<int, Af> mp;
+    for(int i = 0; i < n; ++i) {
+      int k = (int)(rng() % 50);
+      Af v = rnd_af(rng);
+      t.upsert(k, v), mp[k] = v;
+    }
+    for(auto const& [k, v]: mp) {
+      // key も value も木の内部を指す参照で upsert(=実質の自己代入).
+      t.upsert(t.key_at(t.lower_bound(k)), t.get(k));
+      if(t.get(k) != v) fail("upsert self-alias: value corrupted");
+    }
+    if(t.size() != (int)mp.size()) fail("upsert self-alias: size changed");
+    for(auto const& [k, v]: mp)
+      if(!t.contains(k) || t.get(k) != v) fail("upsert self-alias: content corrupted");
+    // 不在 key を, 木の中の value 参照で挿入するケース(挿入経路の参照生存を確認).
+    int nk = 1000;
+    Af keep = t.get(mp.begin()->first);
+    t.upsert(nk, t.get(mp.begin()->first));
+    if(t.get(nk) != keep) fail("upsert alias insert path");
+    t.clear();
+  }
+}
+
+// 列の split/merge 公開 API(split_off / concat / insert(k,tree) / erase(l,r)).
+// 単発の意味論ではなく「ランダム操作列」で検証する. 木を K 本同時に生かしたまま操作を混ぜるのは,
+//   - split_off が返した木(= merge で再構成された, tail insert では作れない偏った形状)を
+//     さらに split / concat する経路を通すため.
+//   - erase(l,r) の free_all が pool へ返した node を, 別の木が再利用する経路を通すため
+//     (pool は同一テンプレート実体で全木共有なので, 1 本ずつ clear する作りだとこれが起きない).
+void split_merge_test(mt19937& rng) {
+  {
+    constexpr int K = 4;     // 同時に生かす木の本数.
+    constexpr int Lo = 30;   // これを下回った木は操作前に補充する.
+    constexpr int Cap = 100; // これを上回った木は操作後に先頭を捨てる.
+    array<Seq, K> t;
+    array<vector<Af>, K> ref;
+    auto chk = [&](int i, char const* name) {
+      if(!seq_eq(t[i], ref[i])) fail(name);
+    };
+    auto grow = [&](int i, int m) { // ランダム位置への点挿入で要素を足す.
+      for(int j = 0; j < m; ++j) {
+        int k = (int)(rng() % (ref[i].size() + 1));
+        Af v = rnd_af(rng);
+        t[i].insert(k, v), ref[i].insert(ref[i].begin() + k, v);
+      }
+    };
+    for(int i = 0; i < K; ++i) grow(i, Lo + rng() % (Cap - Lo));
+    for(int iter = 0; iter < 4000 && Fc <= 10; ++iter) {
+      // concat / insert(k,tree) / erase(l,r) は木を空にしうるので, 操作前に必ず補充しておく.
+      for(int x = 0; x < K; ++x)
+        if((int)ref[x].size() < Lo) grow(x, Lo + (int)(rng() % (Cap - Lo)) - (int)ref[x].size());
+      int i = rng() % K, j = (i + 1 + rng() % (K - 1)) % K; // concat/insert は this != &ot が前提なので i != j.
+      switch(rng() % 6) {
+      case 0: { // split_off で切り出した木を中身検査してから, 別の木の末尾へ concat.
+        int k = (int)(rng() % (t[i].size() + 1));
+        vector<Af> tail(ref[i].begin() + k, ref[i].end());
+        Seq u = t[i].split_off(k);
+        ref[i].resize(k);
+        chk(i, "split_off left");
+        if(!seq_eq(u, tail)) fail("split_off right");
+        t[j].concat(u);
+        ref[j].insert(ref[j].end(), tail.begin(), tail.end());
+        if(!u.empty()) fail("concat: source not emptied");
+        chk(j, "split_off+concat");
+        break;
+      }
+      case 1: { // 木ごと concat
+        t[i].concat(t[j]);
+        ref[i].insert(ref[i].end(), ref[j].begin(), ref[j].end());
+        ref[j].clear();
+        if(!t[j].empty()) fail("concat: source not emptied");
+        chk(i, "concat"), chk(j, "concat source");
+        break;
+      }
+      case 2: { // 区間挿入.
+        int k = (int)(rng() % (t[i].size() + 1));
+        t[i].insert(k, t[j]);
+        ref[i].insert(ref[i].begin() + k, ref[j].begin(), ref[j].end());
+        ref[j].clear();
+        if(!t[j].empty()) fail("insert(k,tree): source not emptied");
+        chk(i, "insert(k,tree)");
+        break;
+      }
+      case 3: { // 区間削除. 返った node は以降の操作で他の木に再利用される.
+        int l = (int)(rng() % (t[i].size() + 1)), r = (int)(rng() % (t[i].size() + 1));
+        if(l > r) swap(l, r);
+        t[i].erase(l, r);
+        ref[i].erase(ref[i].begin() + l, ref[i].begin() + r);
+        chk(i, "erase(l,r)");
+        break;
+      }
+      case 4: { // 回転: 後半を切り出して自分の先頭へ差し戻す(自分の split 結果を自分に merge し直す).
+        int k = (int)(rng() % (t[i].size() + 1));
+        Seq u = t[i].split_off(k);
+        t[i].insert(0, u);
+        rotate(ref[i].begin(), ref[i].begin() + k, ref[i].end());
+        if(!u.empty()) fail("rotate: source not emptied");
+        chk(i, "rotate by split_off+insert");
+        break;
+      }
+      default: { // 点挿入 / 点削除. split 由来の形状に対して一降下系の API を当てる.
+        grow(i, 1 + rng() % 4);
+        int k = (int)(rng() % t[i].size());
+        t[i].erase(k), ref[i].erase(ref[i].begin() + k);
+        chk(i, "point insert/erase");
+        break;
+      }
+      }
+      // 総要素数を K*Cap で抑える(concat 系は要素を移すだけなので, 補充と釣り合う上限が要る).
+      for(int x = 0; x < K; ++x)
+        if((int)ref[x].size() > Cap) {
+          int d = (int)ref[x].size() - Cap;
+          t[x].erase(0, d), ref[x].erase(ref[x].begin(), ref[x].begin() + d);
+          chk(x, "erase(l,r) trim");
+        }
+      if(iter % 64 == 0) { // 時々, 任意区間の prod が index API として生きているかまで見る(O(N^2)).
+        for(int x = 0; x < K; ++x) {
+          vector<Af> g = t[x].get_vec();
+          for(int l = 0; l <= t[x].size(); ++l) {
+            Af w = af_id();
+            for(int r = l; r <= t[x].size(); ++r) {
+              if(t[x].prod(l, r) != w) fail("prod after split/merge");
+              if(r < t[x].size()) w = af_comp(w, g[r]);
+            }
+          }
+        }
+      }
+    }
+  }
+  { // 境界: 空木と両端の split_off.
+    Seq t, u;
+    Seq z = t.split_off(0);
+    if(!t.empty() || !z.empty()) fail("split_off on empty");
+    t.concat(u);
+    if(!t.empty()) fail("concat empty into empty");
+    t.erase(0, 0);
+    if(!t.empty()) fail("erase(0,0) on empty");
+    Seq a;
+    a.insert(0, Af{2, 3});
+    Seq b = a.split_off(0); // k=0: 全部 右へ.
+    if(!a.empty() || b.size() != 1) fail("split_off k=0");
+    Seq c = b.split_off(1); // k=size: 全部 左に残る.
+    if(b.size() != 1 || !c.empty()) fail("split_off k=size");
+    b.erase(0, 1);
+    if(!b.empty()) fail("erase(l,r) whole tree");
+  }
+}
+
+// ordered の split_off(Key). 分割 → meld で完全復元できることも見る
+// (分割後は key が交わらないので meld の統合関数 f は呼ばれない = 非可換でも結果は一意).
+void split_off_key_test(mt19937& rng) {
+  for(int iter = 0; iter < 600 && Fc <= 10; ++iter) {
+    Ord t;
+    map<int, Af> mp;
+    int n = rng() % 40;
+    for(int i = 0; i < n; ++i) {
+      int k = (int)(rng() % 40);
+      Af v = rnd_af(rng);
+      t.upsert(k, v), mp[k] = v;
+    }
+    int s = (int)(rng() % 44) - 2; // 全要素が片側に寄る境界も引く.
+    Ord u = t.split_off(s);
+    map<int, Af> ml, mr;
+    for(auto const& [k, v]: mp) (k < s ? ml : mr)[k] = v;
+    if(!ord_eq(t, ml)) fail("split_off(Key) left");
+    if(!ord_eq(u, mr)) fail("split_off(Key) right");
+    t.meld(u);
+    if(!ord_eq(t, mp) || !u.empty()) fail("split_off(Key)+meld roundtrip");
+    for(int k = -2; k < 42; ++k) { // 復元後も key API が生きているか.
+      if(t.contains(k) != mp.contains(k)) fail("contains after split_off(Key)");
+      if(t.lower_bound(k) != (int)distance(mp.begin(), mp.lower_bound(k))) fail("lower_bound after split_off(Key)");
+    }
+    t.clear();
+  }
 }
 
 int main(int argc, char** argv) {
@@ -443,6 +668,9 @@ int main(int argc, char** argv) {
   extreme_key_test(rng);
   copy_test(rng);
   meld_test(rng);
+  split_merge_test(rng);
+  split_off_key_test(rng);
+  alias_test(rng);
   balance_test();
   cerr << (Fc ? to_string(Fc) + " FAILURES\n" : "ALL OK\n");
   return Fc ? 1 : 0;
