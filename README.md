@@ -8,7 +8,8 @@
 cpp_library/
 ├── src/          # ライブラリのソース（ジャンル別）
 ├── lion/         # インクルード用まとめファイル
-└── document/     # 各ライブラリのドキュメント
+├── document/     # 各ライブラリのドキュメント
+└── test/         # ライブラリのテスト
 ```
 
 ## インクルード方法
@@ -76,10 +77,14 @@ cpp_library/
 - [memory_pool.hpp](src/pool/memory_pool.hpp) \
   メモリプール。`malloc` によるチャンク確保とフリーリストを組み合わせ、`alloc`/`free` を均し $O(1)$ で提供する。
 - [static_pool.hpp](src/pool/static_pool.hpp) \
-  静的配列による index 版メモリプール。`alloc`/`free` を $O(1)$ で提供し、安定した index/参照を得られる。グローバル/`new` 確保前提。 \
-  通常は [static_pool_fast.hpp](src/pool/static_pool_fast.hpp)（intrusive free list）が使われ、`LION_DEBUG` 定義時のみ [static_pool_checked.hpp](src/pool/static_pool_checked.hpp) に自動で差し替わる。検知版は世代付きハンドルにより、free 後アクセス・二重 free・free したスロットが再確保された後の古いハンドルの使用・解放済み領域への書き込み・容量超過などを `assert` で検出する（速度は不問）。 \
-  ハンドル型は実装で異なる（通常 `uint32_t` / 検知版は構造体）ため、利用側は `static_pool<T,N>::id_type`（または `static_pool_id`）で受けること。 \
+  静的配列による index 版メモリプール。`alloc` が返すハンドル（`id_type`）で要素にアクセスし、確保済み要素は移動しない。グローバル/`new` 確保前提。`LION_DEBUG` の有無で下記 2 つの実体を切り替えるので、利用側はこのファイルだけを include し、ハンドルは `id_type` で受ける。 \
   [document](document/static_pool.md)
+  - [static_pool_checked.hpp](src/pool/static_pool_checked.hpp) \
+    `static_pool` の `LION_DEBUG` 定義時の実体（誤用検知版）。世代付きハンドルにより、free 後アクセス・二重 free・再確保後の古いハンドルの使用・解放済み領域への書き込み・容量超過などを `assert` で検出する（速度は不問）。 \
+    [document](document/static_pool_checked.md)
+  - [static_pool_fast.hpp](src/pool/static_pool_fast.hpp) \
+    `static_pool` の通常ビルドでの実体。intrusive free list により `alloc`/`free`/`clear` が $O(1)$。誤用は検知しない。 \
+    [document](document/static_pool_fast.md)
 
 ### others
 
@@ -101,6 +106,9 @@ cpp_library/
 - [RedBlackTree.hpp](src/self_balancing_BST/RedBlackTree.hpp) \
   キーと値のペアを管理する平衡二分探索木（赤黒木）。挿入・削除・検索・区間積クエリ・二分探索・木の分割合併を $O(\log N)$ でサポート。 \
   [document](document/RedBlackTree.md)
+- [WeightBalancedLeafyTree.hpp](src/self_balancing_BST/WeightBalancedLeafyTree.hpp) \
+  重み平衡 leafy 木。key 型を `void` にすると列（index 指定の挿入・削除・区間積・分割・連結）、key 型を指定すると key が一意の順序付き map（key 範囲・index 範囲の区間積、木上二分探索、分割、併合）として使える。各操作 $O(\log N)$。`static_pool` に依存する。 \
+  [document](document/WeightBalancedLeafyTree.md)
 
 ### utils
 

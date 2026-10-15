@@ -3,29 +3,16 @@
 using namespace std;
 
 // static_pool の高速版(誤用検知なし). 直接 include せず "src/pool/static_pool.hpp" 経由で使う
-// (LION_DEBUG 時は検知版 static_pool_checked.hpp に差し替わる).
-//
-// ハンドル型. fast 版では生の index そのもの(4B). 検知版では {idx, gen} の構造体になる.
-// 利用側はこの型を不透明な ID として扱うこと
-// (== 比較・代入・pool への添字のみ. 算術や整数への変換に依存しない).
-// T 非依存の名前空間スコープ型にしてあるのは, pool<T> の T(node 等)を定義する前に
-// ハンドル型を参照したい(node が子ハンドルを持つ)という循環依存を避けるため.
+// (使い方は document/static_pool.md, 仕様と内部構造は document/static_pool_fast.md).
+
+// ハンドル型(生の index そのもの). T 非依存の名前空間スコープ型にしてあるのは, pool<T> の T(node 等)を
+// 定義する前にハンドル型を参照したい(node が子ハンドルを持つ)という循環依存を避けるため.
 using static_pool_id = uint32_t;
 
-// 静的配列 + intrusive free list によるメモリプール(index 版).
-//   - 静的配列: 確保済みオブジェクトは移動しないので index/参照が安定.
-//               木の回転・構築のように「触りながら確保する」用途に向く.
-//   - intrusive free list: free したスロットの領域に次の空き index を書く.
-//               別コンテナ(stack=deque)を持たず alloc/free が数命令.
-//   - 返り値は id_type(=uint32_t). ポインタ(8B)より軽く相互参照のキャッシュ効率が良い.
-//   - slot は union ではなく生バイト領域(std::byte). これにより slot/array/static_pool を
-//     trivially destructible に保ち, グローバルプールを「終了時に破棄しない(生存期間が
-//     プロセス終了まで続く)」状態にする. 結果, 静的破棄順に依存せず, グローバル木の
-//     ~デストラクタが終了時に pool を触っても use-after-lifetime にならない.
-//     生存中の T の破棄は free/clear が管理(非trivial T の残存要素は fast 時に破棄を捨てる).
-// N: 同時に生存しうる最大要素数.
-//    buf を実体で抱えるため sizeof が N*sizeof(slot) と巨大. ローカル変数だと
-//    スタックオーバーフローで RE. グローバル or new での確保を前提とする.
+// 静的配列 + intrusive free list によるメモリプール(index 版). N は同時に生存しうる最大要素数.
+// slot は union ではなく生バイト領域(std::byte)にして, slot/array/static_pool を trivially destructible に保つ.
+// これでグローバルプールは終了時に破棄されず, グローバル木のデストラクタが終了時に pool を触っても
+// use-after-lifetime にならない(静的破棄順に依存しない). 生存中の T の破棄は free/clear が管理する.
 template<class T, size_t N = (1 << 20) - 1>
 struct static_pool {
   static inline bool fast = false;

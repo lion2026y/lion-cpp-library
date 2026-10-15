@@ -4,11 +4,8 @@
 #include <bits/stdc++.h>
 using namespace std;
 
-// Weight Balanced Leafy Tree
+// Weight Balanced Leafy Tree(使い方は document/WeightBalancedLeafyTree.md).
 // 葉に要素・内部ノードは集約のみを持つ leafy 木を、重み(葉数)で平衡する.
-// メモリは index 版 static_pool(ハンドル型 id_type). 通常ビルドでは id_type=uint32_t で子参照 4B,
-// キャッシュ効率重視. LION_DEBUG では誤用検知版 pool に差し替わり id_type も世代付きになる.
-// merge,split,meld に注意.
 //
 // 平衡: BB[alpha] 相当. 内部ノード u の子 a,b は w(a)<=delta*w(b) && w(b)<=delta*w(a) を保つ(delta=5/2).
 //       join 中に崩れたら single/double 回転(grandchild の重みを gamma=3/2 で比較して選択).
@@ -17,7 +14,6 @@ using namespace std;
 //       崩れた場合に自前で回転してはいけない(balance() が merge_sub に委ねる理由).
 // is_leaf() は sz==1(葉は必ず重み 1, 内部は必ず >=2). union の判別子.
 // NIL は「空木の root」だけを意味する(子ハンドルが NIL になることは無い).
-// ordered 木は key 一意(map 意味論). 同じ key の insert は値を置換, meld は f で値を統合.
 namespace wblt_impl {
 // ordered 専用フィールドは「単一の条件付き型」に集約する(同じ空型を 2 つ並べると
 // [intro.object]/9 により 0 バイトに畳めないため). K=void(=sequence)で空になる.
@@ -38,14 +34,8 @@ struct no_wl {}; // wl を持たない node の placeholder(空型).
 
 using bbst::Mode;
 
-// Key=void で sequence(列, ordered=false), Key=非void で ordered(key 順序 map)を表す.
-//   sequence:     weight_balanced_leafy_tree<Mode::plain, void, Value>
-//   ordered map:  weight_balanced_leafy_tree<Mode::plain, Key, Value>
-// Value 既定は Key(ordered set 用). Key=void 時は Value を void にできないので long long を既定にする.
-// N は static_pool の容量(同時生存 node 数の上限). 葉数 n の木は最大 2n-1 node を使う.
-// pool は同一テンプレート実体で共有・free 分は再利用されるので, 全木の総要素数を n_total とすると
-// N >= 2*n_total 程度(split/merge 中の一時 node 分に少し余裕)を確保する. 既定 (1<<20)-1 ≒ 52 万要素.
-// Q_e: Q の単位元を返す関数(materialize して静的 e に保持).
+// RawKey=void で sequence(列), 非void で ordered(key 順序 map). 各テンプレートパラメータの意味と
+// N(static_pool の容量)の見積もりは document を参照.
 template<Mode mode = Mode::plain, class RawKey = void,
          class Value = conditional_t<is_void_v<RawKey>, long long, RawKey>,
          auto Q = plus<Value>{}, auto Q_e = bbst::default_e<Value>,
