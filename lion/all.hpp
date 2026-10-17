@@ -5,6 +5,7 @@
 #include "lion/fraction.hpp"
 #include "lion/grid_transform.hpp"
 #include "lion/hashmap.hpp"
+#include "lion/interval_set.hpp"
 #include "lion/lazy_RedBlackTree.hpp"
 #include "lion/line_segment.hpp"
 #include "lion/memory_pool.hpp"

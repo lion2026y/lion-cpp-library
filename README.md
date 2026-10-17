@@ -93,6 +93,9 @@ cpp_library/
 - [divset.hpp](src/others/divset.hpp) \
   多重集合を比較関数の意味で大きいもの $k$ 個とそれ以外に分けて保持する構造体。要素の出入り時のコールバック `add`/`del` で上位 $k$ 個の和などを差分管理でき、追加・削除・$k$ の増減を $O(\log n)$ でサポート。`noop` に依存する。 \
   [document](document/divset.md)
+- [interval_set.hpp](src/others/interval_set.hpp) \
+  互いに交わらない半開区間 $[l, r)$ と値の組を `std::set` で管理する構造体。区間代入・区間削除・点を含む区間の検索・mex をサポートし、接する同じ値の区間は自動で連結される。区間の出入り時のコールバック `add`/`del` で集計値を差分管理でき、各操作は償却 $O(\log n)$。`noop` に依存する。 \
+  [document](document/interval_set.md)
 - [timer.hpp](src/others/timer.hpp) \
   経過時間をミリ秒単位で計測するタイマー。`steady_clock` ベースで単調増加保証。グローバルインスタンス `cl` が定義済み。 \
   [document](document/timer.md)
