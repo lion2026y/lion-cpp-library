@@ -324,12 +324,15 @@ T1 obj.argument<T1>()
 ### comp_arg
 
 ```cpp
-bool comp_arg<T1>(point const& a, point const& b)
+bool comp_arg(point<T> const& a, point<T> const& b)
+bool comp_arg_t<T1>{}(point<T> const& a, point<T> const& b)
 ```
 
-偏角の昇順比較。`T` が整数型のとき浮動小数点を使わずに偏角を比較する。`std::sort` の比較関数として使用可能。
+偏角（`argument()` と同じ $[0, 2\pi)$）の昇順比較。`T` が整数型のとき浮動小数点を使わずに偏角を比較する。偏角が等しい点どうしは同値として扱う。
 
-注意: 引数に直接この関数を渡すと見つからないことがあるため、その場合はラムダで包んで渡すこと。
+`comp_arg` は名前空間スコープの関数オブジェクト（`comp_arg_t<>` 型の定数）なので、ラムダで包まずに `sort` / `ranges::sort` の比較関数としてそのまま渡せる。`set` などの比較型には `comp_arg_t<>` を指定する。
+
+`T1` は外積の計算に使う型で、`void`（デフォルト）なら座標の型 `T` を使う。座標値が大きい場合（$\sim 10^{18}$）は `comp_arg_t<__int128>{}` を使ってオーバーフローを防ぐこと。
 
 **制約**
 
@@ -343,7 +346,10 @@ bool comp_arg<T1>(point const& a, point const& b)
 
 ```cpp
 vector<point<>> ps = {{1,0},{0,1},{-1,0}};
-sort(ps.begin(), ps.end(), [](auto& a, auto& b){ return comp_arg(a, b); });
+sort(ps.begin(), ps.end(), comp_arg);        // ラムダで包まずに渡せる
+ranges::sort(ps, comp_arg_t<__int128>{});    // 座標が ~10^18 のとき
+set<point<>, comp_arg_t<>> s;                // 比較型として使う
+bool b = comp_arg(ps[0], ps[1]);             // 直接呼び出しも可
 ```
 
 ## グリッドアクセス
