@@ -89,16 +89,6 @@ struct point {
     if(r >= 0) return r;
     else return r + 2 * numbers::pi_v<T1>;
   }
-  // Tが整数型の時に浮動小数点数を使用しない偏角の比較.
-  // 引数にこの関数を入れるとき、見つからないことがあるのでその時はラムダから呼ぶ.
-  // 座標値が大きい場合(~10^18)はT1=__int128を指定してオーバーフローを防ぐこと.
-  template<class T1 = T>
-  friend constexpr bool comp_arg(point const& a, point const& b) {
-    assert(!a.is_zero() && !b.is_zero());
-    bool ao = a.y == 0 ? a.x < 0 : a.y < 0, bo = b.y == 0 ? b.x < 0 : b.y < 0; // 頂点が第3,4象限にあるか.
-    if(ao != bo) return ao < bo;
-    return a.cross_product<T1>(b) > 0;
-  }
 
   // 2次元グリッド r を点 p で添字アクセスする. at(g, p) = ... のように使う.
   template<ranges::random_access_range R>
@@ -114,3 +104,18 @@ struct point {
     return ranges::begin(row)[p.y];
   }
 };
+
+// Tが整数型の時に浮動小数点数を使用しない偏角の比較.
+// 関数オブジェクトなので sort(v.begin(), v.end(), comp_arg) のようにそのまま渡せる.
+// 座標値が大きい場合(~10^18)は comp_arg_t<__int128>{} を使ってオーバーフローを防ぐこと.
+template<class T1 = void> // 外積の計算に使う型. void なら座標の型を使う.
+struct comp_arg_t {
+  template<class T>
+  constexpr bool operator()(point<T> const& a, point<T> const& b) const {
+    assert(!a.is_zero() && !b.is_zero());
+    bool ao = a.y == 0 ? a.x < 0 : a.y < 0, bo = b.y == 0 ? b.x < 0 : b.y < 0; // 偏角が [pi, 2pi) にあるか.
+    if(ao != bo) return ao < bo;
+    return a.template cross_product<conditional_t<is_void_v<T1>, T, T1>>(b) > 0;
+  }
+};
+inline constexpr comp_arg_t<> comp_arg{};
