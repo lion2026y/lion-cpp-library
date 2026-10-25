@@ -1,5 +1,6 @@
 #include "lion/RedBlackTree.hpp"
 #include "lion/WeightBalancedLeafyTree.hpp"
+#include "lion/adjacency_list.hpp"
 #include "lion/cumulative_sum.hpp"
 #include "lion/divset.hpp"
 #include "lion/fraction.hpp"
