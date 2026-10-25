@@ -52,6 +52,14 @@ cpp_library/
   2次元座標・ベクトル構造体。距離・内積・外積・偏角などの幾何演算に加え、点によるグリッド添字アクセス（`at`/`at_safe`）を提供する。 \
   [document](document/point.md)
 
+### graph
+
+グラフの入力・構築などグラフ関連のライブラリ。
+
+- [adjacency_list.hpp](src/graph/adjacency_list.hpp) \
+  標準入力から辺を読み込み、0-indexed の隣接リストを返す関数群。有向/無向・1-indexed/0-indexed・重みの有無・木（$n - 1$ 辺）を引数やオーバーロードで切り替えられ、範囲外の頂点番号は `assert` で検出する。 \
+  [document](document/adjacency_list.md)
+
 ### grid
 
 多次元配列・グリッド操作ユーティリティ。
